@@ -3,7 +3,7 @@ name: Rapport Bourse Quotidien
 on:
   schedule:
     # 07:00 UTC correspond à 09:00 heure de Paris (heure d'été) du lundi au vendredi
-    - cron: '0 7 * * 1-5'
+    - cron: '11 7 * * 1-5'
   workflow_dispatch: # Ce bouton magique permet de lancer un test manuellement !
 
 jobs:
