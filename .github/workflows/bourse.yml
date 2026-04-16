@@ -10,7 +10,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: 📥 Recuperation du code
+      - name: 💾 Recuperation du code
         uses: actions/checkout@v4
 
       - name: 🐍 Installation de Python
@@ -20,11 +20,10 @@ jobs:
 
       - name: ⚙️ Installation des outils boursiers
         run: |
-          pip install yfinance pandas requests numpy
+          pip install yfinance pandas requests numpy matplotlib
 
       - name: 🚀 Lancement du Screener
         env:
-          # C'est ici que le serveur ouvre votre coffre-fort pour lire vos codes secrets
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python screener_pro.py
