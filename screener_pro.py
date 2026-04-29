@@ -39,7 +39,11 @@ actifs = {
 # Format : "TICKER": {"nom": "...", "prix_achat": 00.00, "quantite": 0}
 # Exemple : "WPEA.PA": {"nom": "ETF MSCI World", "prix_achat": 5.12, "quantite": 10}
 portefeuille = {
-    # "WPEA.PA": {"nom": "ETF MSCI World", "prix_achat": 0.00, "quantite": 0},
+    "MC.PA": {
+        "nom": "LVMH", 
+        "prix_achat": 458.45,
+        "quantite": 1
+    }
 }
 
 # ── Multiplicateur ATR pour les alertes ────────────────────────────────────
