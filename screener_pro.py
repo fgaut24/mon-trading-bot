@@ -35,26 +35,23 @@ actifs = {
 }
 
 # ── Portefeuille personnel ──────────────────────────────────────────────────
-# Remplis ce dictionnaire quand tu auras tes premières positions.
 # Format : "TICKER": {"nom": "...", "prix_achat": 00.00, "quantite": 0}
-# Exemple : "WPEA.PA": {"nom": "ETF MSCI World", "prix_achat": 5.12, "quantite": 10}
 portefeuille = {
-    "MC.PA": {
-        "nom": "LVMH", 
-        "prix_achat": 458.45,
-        "quantite": 1
-    }
+    "MC.PA": {"nom": "LVMH", "prix_achat": 458.00, "quantite": 1},
 }
 
 # ── Multiplicateur ATR pour les alertes ────────────────────────────────────
-# Une variation > ATR_MULT × ATR déclenche une alerte (défaut : 1.5×)
 ATR_MULT = 1.5
+
+# ── Seuils PER pour les étiquettes (informatif uniquement) ─────────────────
+PER_BON      = 15   # En dessous : value / bon marché
+PER_ELEVE    = 30   # Au dessus  : cherté à surveiller
+PER_EXTREME  = 50   # Au dessus  : très spéculatif
 
 # ════════════════════════════════════════
 # UTILITAIRES TELEGRAM
 # ════════════════════════════════════════
 def envoyer_texte(texte):
-    """Envoie un message texte Telegram (découpe si > 4000 caractères)."""
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     for i in range(0, len(texte), 4000):
         try:
@@ -64,7 +61,6 @@ def envoyer_texte(texte):
 
 
 def envoyer_image(buf, legende=""):
-    """Envoie une image (BytesIO) sur Telegram."""
     url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
     buf.seek(0)
     try:
@@ -100,7 +96,6 @@ def calcul_bollinger(close, fenetre=20, nb_ecarts=2):
 
 
 def calcul_atr(data, periode=14):
-    """Average True Range : mesure le 'rythme cardiaque' normal d'un actif."""
     high  = data['High']
     low   = data['Low']
     close = data['Close']
@@ -113,12 +108,54 @@ def calcul_atr(data, periode=14):
 
 
 # ════════════════════════════════════════
+# DONNÉES FONDAMENTALES
+# ════════════════════════════════════════
+def lire_fondamentaux(info, nom):
+    """
+    Extrait PER et rendement du dividende depuis ticker.info.
+    Retourne des chaînes formatées prêtes à afficher.
+    """
+    est_etf_or = ("ETF" in nom or "Or" in nom)
+
+    # ── PER ──
+    per_val = info.get('trailingPE') or info.get('forwardPE')
+    if per_val and not np.isnan(float(per_val)):
+        per = float(per_val)
+        if per <= 0:
+            per_txt = "PER n/d"
+        elif per < PER_BON:
+            per_txt = f"PER {per:.0f} 🟢"
+        elif per < PER_ELEVE:
+            per_txt = f"PER {per:.0f} 🟡"
+        elif per < PER_EXTREME:
+            per_txt = f"PER {per:.0f} 🟠"
+        else:
+            per_txt = f"PER {per:.0f} 🔴"
+    else:
+        per_txt = "PER n/d" if not est_etf_or else "PER —"
+
+    # ── Dividende ──
+    div_val = info.get('dividendYield')
+    if div_val and not np.isnan(float(div_val)):
+        div = float(div_val) * 100
+        if div >= 4:
+            div_txt = f"Div {div:.1f}% 💰"
+        elif div >= 2:
+            div_txt = f"Div {div:.1f}% 🟡"
+        else:
+            div_txt = f"Div {div:.1f}%"
+    else:
+        div_txt = "Div 0%" if not est_etf_or else "Div —"
+
+    return per_txt, div_txt
+
+
+# ════════════════════════════════════════
 # GRAPHIQUES
 # ════════════════════════════════════════
 def graphique_global(resultats):
-    """Graphique à barres : performance 6 mois de tous les actifs."""
-    noms  = [v['nom']        for v in resultats.values()]
-    perfs = [v['perf_6m']*100 for v in resultats.values()]
+    noms    = [v['nom']         for v in resultats.values()]
+    perfs   = [v['perf_6m']*100 for v in resultats.values()]
     couleurs = ['#2ecc71' if p >= 0 else '#e74c3c' for p in perfs]
 
     fig, ax = plt.subplots(figsize=(10, 5))
@@ -147,8 +184,7 @@ def graphique_global(resultats):
 
 
 def graphique_actif(ticker_str, nom, data):
-    """Graphique individuel : cours 3 mois + Bollinger + MACD (90 derniers jours)."""
-    data = data.tail(90).copy()
+    data  = data.tail(90).copy()
     close = data['Close']
     dates = data.index
 
@@ -166,7 +202,6 @@ def graphique_actif(ticker_str, nom, data):
         ax.tick_params(colors='white', labelsize=8)
         ax.spines[:].set_color('#0f3460')
 
-    # ── Cours + Bollinger ──
     ax1.plot(dates, close,  color='#f0e68c', linewidth=1.5, label='Cours', zorder=3)
     ax1.plot(dates, sma20,  color='#87ceeb', linewidth=1,   label='SMA20',  linestyle='--', alpha=0.7)
     ax1.plot(dates, bb_h,   color='#ff7f7f', linewidth=0.8, label='BB Haut', linestyle=':')
@@ -176,9 +211,7 @@ def graphique_actif(ticker_str, nom, data):
                   fontsize=11, fontweight='bold', pad=8)
     ax1.legend(loc='upper left', fontsize=7, facecolor='#0f3460',
                labelcolor='white', framealpha=0.8)
-    ax1.yaxis.label.set_color('white')
 
-    # ── MACD ──
     colors_hist = ['#2ecc71' if h >= 0 else '#e74c3c' for h in histogramme]
     ax2.bar(dates, histogramme, color=colors_hist, alpha=0.6, label='Histogramme')
     ax2.plot(dates, macd, color='#00bfff', linewidth=1,   label='MACD')
@@ -230,12 +263,13 @@ def analyser(ticker_str, nom):
     bb_bas     = bb_l.iloc[-1]
     atr        = calcul_atr(data)
 
-    # ── Consensus analystes ──
+    # ── Consensus analystes + fondamentaux ──
     try:
         info = ticker.info
         rec  = info.get('recommendationKey', 'none').lower()
     except Exception:
-        rec = 'none'
+        info = {}
+        rec  = 'none'
 
     est_etf_or = ("ETF" in nom or "Or" in nom)
     if rec in ['buy', 'strong_buy']:
@@ -246,6 +280,8 @@ def analyser(ticker_str, nom):
         avis, feu_vert = "Vente ❌", False
     else:
         avis, feu_vert = "Non noté", est_etf_or
+
+    per_txt, div_txt = lire_fondamentaux(info, nom)
 
     # ── Score de conviction (0 → 3) ──
     score = 0
@@ -282,6 +318,8 @@ def analyser(ticker_str, nom):
         "signal":   signal,
         "score":    score,
         "alertes":  alertes,
+        "per_txt":  per_txt,
+        "div_txt":  div_txt,
     }, data
 
 
@@ -292,30 +330,30 @@ def section_portefeuille(resultats):
     if not portefeuille:
         return "💼 PORTEFEUILLE\n  (Aucune position renseignée — prêt à l'emploi !)\n"
 
-    r  = "💼 PORTEFEUILLE PERSONNEL\n"
-    total_investi  = 0.0
-    total_actuel   = 0.0
+    r = "💼 PORTEFEUILLE PERSONNEL\n"
+    total_investi = 0.0
+    total_actuel  = 0.0
 
     for ticker_str, pos in portefeuille.items():
-        nom         = pos.get("nom", ticker_str)
-        prix_achat  = pos.get("prix_achat", 0)
-        quantite    = pos.get("quantite", 0)
+        nom          = pos.get("nom", ticker_str)
+        prix_achat   = pos.get("prix_achat", 0)
+        quantite     = pos.get("quantite", 0)
         valeur_achat = prix_achat * quantite
 
         res = resultats.get(nom)
         if res:
-            prix_actuel  = res["prix"]
+            prix_actuel     = res["prix"]
             valeur_actuelle = prix_actuel * quantite
-            pv           = valeur_actuelle - valeur_achat
-            pv_pct       = (pv / valeur_achat * 100) if valeur_achat else 0
-            emoji        = "🟢" if pv >= 0 else "🔴"
+            pv              = valeur_actuelle - valeur_achat
+            pv_pct          = (pv / valeur_achat * 100) if valeur_achat else 0
+            emoji           = "🟢" if pv >= 0 else "🔴"
             r += f"  {emoji} {nom}\n"
             r += f"     {quantite} parts × {prix_actuel:.2f}  =  {valeur_actuelle:.0f} €\n"
             r += f"     P&L : {pv:+.0f} € ({pv_pct:+.1f}%)\n"
+            r += f"     {res['per_txt']} | {res['div_txt']}\n"
             total_investi += valeur_achat
             total_actuel  += valeur_actuelle
 
-            # Alerte +10% / -10%
             if pv_pct >= 10:
                 r += f"     🎯 +10% atteint — envisage de sécuriser ?\n"
             elif pv_pct <= -10:
@@ -330,6 +368,27 @@ def section_portefeuille(resultats):
         r += f"\n  {emoji_tot} TOTAL  {total_actuel:.0f} € / investi {total_investi:.0f} €\n"
         r += f"     P&L global : {pv_total:+.0f} € ({pv_total_pct:+.1f}%)\n"
     return r
+
+
+# ════════════════════════════════════════
+# FORMATAGE LIGNE ACTIF (rapport texte)
+# ════════════════════════════════════════
+def ligne_actif(v, mode="conserver"):
+    """Formate une ligne d'actif avec PER et dividende."""
+    per = v['per_txt']
+    div = v['div_txt']
+    if mode == "acheter":
+        etoiles  = "⭐" * v['score'] if v['score'] > 0 else "○"
+        macd_txt = "MACD ✅" if v['macd_ok'] else "MACD ➖"
+        return (f"  • {v['nom']}  {etoiles}\n"
+                f"    RSI {v['rsi']:.0f} | {macd_txt} | BB {v['bb_pos']} | {v['avis']}\n"
+                f"    {per} | {div}\n")
+    elif mode == "vendre":
+        return (f"  • {v['nom']}  RSI {v['rsi']:.0f}  {v['var_jour']:+.1f}% aujourd'hui\n"
+                f"    {per} | {div}\n")
+    else:  # conserver
+        return (f"  • {v['nom']}  RSI {v['rsi']:.0f}  {v['tendance']}\n"
+                f"    {per} | {div}\n")
 
 
 # ════════════════════════════════════════
@@ -372,16 +431,19 @@ try:
     # RAPPORT TEXTE
     # ══════════════════════════════════════
     date_str = datetime.now().strftime("%d/%m/%Y %H:%M")
-    r  = f"📊 BILAN STRATÉGIQUE 8.0\n"
+    r  = f"📊 BILAN STRATÉGIQUE 9.0\n"
     r += f"🗓️ {date_str}\n"
     r += "═" * 32 + "\n\n"
     r += f"🌡️ MÉTÉO MARCHÉ : {meteo}\n\n"
+
+    # Légende PER
+    r += "📖 Légende PER : 🟢 <15 value | 🟡 15-30 correct | 🟠 30-50 élevé | 🔴 >50 spéculatif\n\n"
 
     # Top momentum
     r += "📈 TOP MOMENTUM 6 MOIS\n"
     top3 = sorted(resultats.values(), key=lambda x: x['perf_6m'], reverse=True)[:3]
     for i, v in enumerate(top3, 1):
-        r += f"  {i}. {v['nom']}  {v['perf_6m']*100:+.1f}%  {v['tendance']}\n"
+        r += f"  {i}. {v['nom']}  {v['perf_6m']*100:+.1f}%  {v['tendance']}  {v['per_txt']} | {v['div_txt']}\n"
 
     # Alertes ATR
     r += "\n🔔 ALERTES DU JOUR (ATR dynamique)\n"
@@ -394,31 +456,28 @@ try:
     r += "\n💰 ACHETER / RENFORCER\n"
     if verdicts["ACHETER"]:
         for v in sorted(verdicts["ACHETER"], key=lambda x: -x['score']):
-            etoiles  = "⭐" * v['score'] if v['score'] > 0 else "○"
-            macd_txt = "MACD ✅" if v['macd_ok'] else "MACD ➖"
-            r += f"  • {v['nom']}  {etoiles}\n"
-            r += f"    RSI {v['rsi']:.0f} | {macd_txt} | BB {v['bb_pos']} | {v['avis']}\n"
+            r += ligne_actif(v, "acheter")
     else:
         r += "  Aucune opportunité validée\n"
 
     r += "\n🛡️ BLOQUÉS (signal achat, consensus défavorable)\n"
     if verdicts["BLOQUER"]:
         for v in verdicts["BLOQUER"]:
-            r += f"  • {v['nom']}  (Consensus : {v['avis']})\n"
+            r += ligne_actif(v, "acheter")
     else:
         r += "  Aucun\n"
 
     r += "\n💎 CONSERVER\n"
     if verdicts["CONSERVER"]:
         for v in verdicts["CONSERVER"]:
-            r += f"  • {v['nom']}  RSI {v['rsi']:.0f}  {v['tendance']}\n"
+            r += ligne_actif(v, "conserver")
     else:
         r += "  Rien à signaler\n"
 
     r += "\n⚠️ VENDRE / ALLÉGER\n"
     if verdicts["VENDRE"]:
         for v in verdicts["VENDRE"]:
-            r += f"  • {v['nom']}  RSI {v['rsi']:.0f}  {v['var_jour']:+.1f}% aujourd'hui\n"
+            r += ligne_actif(v, "vendre")
     else:
         r += "  Aucun signal de vente\n"
 
@@ -427,15 +486,13 @@ try:
     r += section_portefeuille(resultats)
 
     r += "\n" + "─" * 32
-    r += "\n🤖 Analyse : RSI14 · MACD · Bollinger20 · SMA200 · ATR14"
+    r += "\n🤖 Analyse : RSI14 · MACD · Bollinger20 · SMA200 · ATR14 · PER · Dividende"
 
     envoyer_texte(r)
 
     # ══════════════════════════════════════
     # GRAPHIQUES
     # ══════════════════════════════════════
-
-    # 1. Graphique global performances
     try:
         buf = graphique_global(resultats)
         envoyer_image(buf, "📊 Performance comparée 6 mois")
@@ -443,23 +500,22 @@ try:
     except Exception as e:
         print(f"⚠️ Erreur graphique global : {e}")
 
-    # 2. Graphiques individuels (actifs signalés ACHETER, BLOQUER ou VENDRE)
     actifs_a_grapher = verdicts["ACHETER"] + verdicts["BLOQUER"] + verdicts["VENDRE"]
     for v in actifs_a_grapher:
         nom = v["nom"]
         try:
             ticker_str, data = data_cache[nom]
             buf = graphique_actif(ticker_str, nom, data)
-            legende = f"{nom}  |  RSI {v['rsi']:.0f}  |  BB {v['bb_pos']}  |  {v['avis']}"
+            legende = f"{nom}  |  RSI {v['rsi']:.0f}  |  BB {v['bb_pos']}  |  {v['per_txt']}  |  {v['div_txt']}"
             envoyer_image(buf, legende)
             print(f"✅ Graphique {nom} envoyé")
         except Exception as e:
             print(f"⚠️ Erreur graphique {nom} : {e}")
 
-    print("✅ Rapport 8.0 complet envoyé !")
+    print("✅ Rapport 9.0 complet envoyé !")
 
 except Exception as e:
-    msg = f"❌ Erreur Critique V8.0 : {e}"
+    msg = f"❌ Erreur Critique V9.0 : {e}"
     print(msg)
     try:
         envoyer_texte(msg)
