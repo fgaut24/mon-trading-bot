@@ -1,9 +1,3 @@
-Voici le script complet et définitif (Version 9.3).
-
-Il intègre absolument toutes nos améliorations : la correction des dividendes, le formatage ultra-sécurisé pour Telegram (`MarkdownV2`), votre ligne LVMH, les drapeaux géographiques, et la **nouvelle connexion sécurisée (`os.environ`)** pour communiquer avec votre fichier GitHub Actions.
-
-Vous pouvez copier ce bloc en entier et remplacer le contenu de votre fichier `screener_pro.py` :
-
 ```python
 import os
 import datetime
