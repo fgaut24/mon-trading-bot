@@ -1,3 +1,11 @@
+Voici le script complet et définitif (Version 9.3).
+
+Il intègre absolument toutes nos améliorations : la correction des dividendes, le formatage ultra-sécurisé pour Telegram (`MarkdownV2`), votre ligne LVMH, les drapeaux géographiques, et la **nouvelle connexion sécurisée (`os.environ`)** pour communiquer avec votre fichier GitHub Actions.
+
+Vous pouvez copier ce bloc en entier et remplacer le contenu de votre fichier `screener_pro.py` :
+
+```python
+import os
 import datetime
 import time
 import numpy as np
@@ -6,10 +14,11 @@ import requests
 import yfinance as yf
 
 # ==============================================================================
-# CONFIGURATION DU BOT
+# CONFIGURATION DU BOT ET SÉCURITÉ GITHUB ACTIONS
 # ==============================================================================
-TELEGRAM_TOKEN = "VOTRE_TOKEN_TELEGRAM"
-CHAT_ID = "VOTRE_CHAT_ID"
+# Le script récupère maintenant les clés secrètes depuis votre workflow GitHub
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "VOTRE_TOKEN_DE_SECOURS")
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "VOTRE_CHAT_ID_DE_SECOURS")
 
 # Liste officielle des actifs surveillés avec drapeaux d'éligibilité PEA
 TICKERS = {
@@ -35,13 +44,8 @@ portefeuille = {
 }
 
 # ==============================================================================
-# OUTILS DE FORMATAGE MARKDOWNV2
+# OUTILS DE FORMATAGE MARKDOWNV2 (SÉCURITÉ TELEGRAM)
 # ==============================================================================
-# En MarkdownV2, les caractères réservés suivants doivent être précédés d'un '\'
-# lorsqu'ils apparaissent dans du texte ordinaire :
-#   _  *  [  ]  (  )  ~  `  >  #  +  -  =  |  {  }  .  !
-# On échappe donc TOUT le contenu dynamique et littéral, et on n'ajoute les
-# marqueurs de gras '*' qu'autour de segments déjà échappés (via bold()).
 _MD2_SPECIAL = set(r"_*[]()~`>#+-=|{}.!")
 
 def esc(text):
@@ -146,7 +150,7 @@ def generer_rapport():
 
     now = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
 
-    msg = "📊 " + bold("BILAN STRATÉGIQUE 9.2") + "\n"
+    msg = "📊 " + bold("BILAN STRATÉGIQUE 9.3") + "\n"
     msg += esc(f"🗓️ {now}") + "\n"
     msg += SEP + "\n\n"
     msg += esc(f"🌡️ MÉTÉO MARCHÉ : {meteo}") + "\n\n"
@@ -269,16 +273,19 @@ def generer_rapport():
     msg += esc(f"     P&L global : {global_pnl_euro:+.2f} € ({global_pnl_pct:+.1f}%)") + "\n"
 
     msg += "\n" + SEP + "\n"
-    # Texte en monospace : à l'intérieur d'un span `code`, seuls ` et \ seraient
-    # à échapper ; aucun n'est présent ici, on laisse donc le contenu tel quel.
     msg += "🤖 `Analyse : RSI14 · MACD · Bollinger20 · SMA200 · ATR14 · PER · Dividende`"
 
     # Envoi Telegram
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": msg, "parse_mode": "MarkdownV2"}
     response = requests.post(url, json=payload)
+    
     if not response.ok:
         print(f"Échec envoi Telegram ({response.status_code}) : {response.text}")
+    else:
+        print("✅ Rapport envoyé avec succès !")
 
 if __name__ == "__main__":
     generer_rapport()
+
+```
