@@ -280,5 +280,3 @@ def generer_rapport():
 
 if __name__ == "__main__":
     generer_rapport()
-
-```
