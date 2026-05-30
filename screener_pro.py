@@ -1,523 +1,284 @@
-import os
-import yfinance as yf
-import pandas as pd
-import warnings
-import requests
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
-from datetime import datetime
-from io import BytesIO
+import datetime
+import time
 import numpy as np
+import pandas as pd
+import requests
+import yfinance as yf
 
-warnings.filterwarnings('ignore')
+# ==============================================================================
+# CONFIGURATION DU BOT
+# ==============================================================================
+TELEGRAM_TOKEN = "VOTRE_TOKEN_TELEGRAM"
+CHAT_ID = "VOTRE_CHAT_ID"
 
-TOKEN = os.environ.get("TELEGRAM_TOKEN")
-ID    = os.environ.get("TELEGRAM_CHAT_ID")
-
-# ════════════════════════════════════════
-# CONFIGURATION
-# ════════════════════════════════════════
-
-actifs = {
-    "WPEA.PA": "ETF MSCI World",
-    "ESE.PA":  "ETF S&P 500",
-    "MC.PA":   "LVMH",
-    "OR.PA":   "L'Oreal",
-    "TTE.PA":  "TotalEnergies",
-    "AI.PA":   "Air Liquide",
-    "SU.PA":   "Schneider Elec",
-    "AAPL":    "Apple",
-    "MSFT":    "Microsoft",
-    "NVDA":    "Nvidia",
-    "GLD":     "Or Physique",
+# Liste officielle des actifs surveillés avec drapeaux d'éligibilité PEA
+TICKERS = {
+    "TTE.PA": "TotalEnergies 🇪🇺",
+    "MC.PA": "LVMH 🇪🇺",
+    "AI.PA": "Air Liquide 🇪🇺",
+    "OR.PA": "L'Oreal 🇪🇺",
+    "SU.PA": "Schneider Elec 🇪🇺",
+    "WPEA.PA": "ETF MSCI World 🇪🇺",
+    "AAPL": "Apple 🇺🇸",
+    "MSFT": "Microsoft 🇺🇸",
+    "NVDA": "Nvidia 🇺🇸",
+    "GC=F": "Or Physique 🪙"
 }
 
-# ── Portefeuille personnel ──────────────────────────────────────────────────
-# Format : "TICKER": {"nom": "...", "prix_achat": 00.00, "quantite": 0}
+# Suivi du portefeuille personnel réel
 portefeuille = {
-    "MC.PA": {"nom": "LVMH", "prix_achat": 458.00, "quantite": 1},
+    "MC.PA": {
+        "nom": "LVMH",
+        "prix_achat": 458.45,
+        "quantite": 1
+    }
 }
 
-# ── Multiplicateur ATR pour les alertes ────────────────────────────────────
-ATR_MULT = 1.5
+# ==============================================================================
+# OUTILS DE FORMATAGE MARKDOWNV2
+# ==============================================================================
+# En MarkdownV2, les caractères réservés suivants doivent être précédés d'un '\'
+# lorsqu'ils apparaissent dans du texte ordinaire :
+#   _  *  [  ]  (  )  ~  `  >  #  +  -  =  |  {  }  .  !
+# On échappe donc TOUT le contenu dynamique et littéral, et on n'ajoute les
+# marqueurs de gras '*' qu'autour de segments déjà échappés (via bold()).
+_MD2_SPECIAL = set(r"_*[]()~`>#+-=|{}.!")
 
-# ── Seuils PER pour les étiquettes (informatif uniquement) ─────────────────
-PER_BON      = 15   # En dessous : value / bon marché
-PER_ELEVE    = 30   # Au dessus  : cherté à surveiller
-PER_EXTREME  = 50   # Au dessus  : très spéculatif
+def esc(text):
+    """Échappe les caractères réservés de MarkdownV2 dans un texte ordinaire."""
+    return "".join(f"\\{c}" if c in _MD2_SPECIAL else c for c in str(text))
 
-# ════════════════════════════════════════
-# UTILITAIRES TELEGRAM
-# ════════════════════════════════════════
-def envoyer_texte(texte):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    for i in range(0, len(texte), 4000):
-        try:
-            requests.post(url, json={"chat_id": ID, "text": texte[i:i+4000]}, timeout=10)
-        except Exception as e:
-            print(f"⚠️ Erreur envoi texte Telegram : {e}")
+def bold(text):
+    """Retourne un segment en gras MarkdownV2, contenu intérieur échappé."""
+    return f"*{esc(text)}*"
 
-
-def envoyer_image(buf, legende=""):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
-    buf.seek(0)
+# ==============================================================================
+# FONCTIONS TECHNIQUES ET CALCULS
+# ==============================================================================
+def fetch_indicators(ticker_symbol):
     try:
-        requests.post(url, data={"chat_id": ID, "caption": legende},
-                      files={"photo": ("chart.png", buf, "image/png")}, timeout=30)
-    except Exception as e:
-        print(f"⚠️ Erreur envoi image Telegram : {e}")
+        ticker = yf.Ticker(ticker_symbol)
+        df = ticker.history(period="1y")
 
+        if df.empty or len(df) < 200:
+            return None
 
-# ════════════════════════════════════════
-# INDICATEURS TECHNIQUES
-# ════════════════════════════════════════
-def calcul_rsi(close, periode=14):
-    delta = close.diff()
-    gain  = delta.where(delta > 0, 0).rolling(periode).mean()
-    loss  = (-delta.where(delta < 0, 0)).rolling(periode).mean()
-    rs    = gain / loss.replace(0, np.nan)
-    return (100 - (100 / (1 + rs))).fillna(50)
+        # Calcul du RSI (14 jours)
+        delta = df['Close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df['RSI'] = 100 - (100 / (1 + rs))
 
+        # Calcul du MACD
+        exp1 = df['Close'].ewm(span=12, adjust=False).mean()
+        exp2 = df['Close'].ewm(span=26, adjust=False).mean()
+        df['MACD'] = exp1 - exp2
+        df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
 
-def calcul_macd(close, rapide=12, lent=26, signal=9):
-    ema_r = close.ewm(span=rapide, adjust=False).mean()
-    ema_l = close.ewm(span=lent,   adjust=False).mean()
-    macd  = ema_r - ema_l
-    sig   = macd.ewm(span=signal,  adjust=False).mean()
-    return macd, sig
+        # Bandes de Bollinger
+        df['MA20'] = df['Close'].rolling(window=20).mean()
+        df['STD20'] = df['Close'].rolling(window=20).std()
+        df['BB_High'] = df['MA20'] + (df['STD20'] * 2)
+        df['BB_Low'] = df['MA20'] - (df['STD20'] * 2)
 
+        # SMA 200 et ATR 14 (Volatilité)
+        df['SMA200'] = df['Close'].rolling(window=200).mean()
+        high_low = df['High'] - df['Low']
+        high_close = np.abs(df['High'] - df['Close'].shift())
+        low_close = np.abs(df['Low'] - df['Close'].shift())
+        ranges = pd.concat([high_low, high_close, low_close], axis=1)
+        df['ATR'] = np.max(ranges, axis=1).rolling(14).mean()
 
-def calcul_bollinger(close, fenetre=20, nb_ecarts=2):
-    sma = close.rolling(fenetre).mean()
-    std = close.rolling(fenetre).std()
-    return sma + nb_ecarts * std, sma - nb_ecarts * std
+        # Calcul des variations de Momentum (6 mois)
+        df['Var_6M'] = df['Close'].pct_change(periods=126) * 100
 
+        last_row = df.iloc[-1]
+        prev_row = df.iloc[-2]
 
-def calcul_atr(data, periode=14):
-    high  = data['High']
-    low   = data['Low']
-    close = data['Close']
-    tr = pd.concat([
-        high - low,
-        (high - close.shift()).abs(),
-        (low  - close.shift()).abs()
-    ], axis=1).max(axis=1)
-    return tr.rolling(periode).mean().iloc[-1]
-
-
-# ════════════════════════════════════════
-# DONNÉES FONDAMENTALES
-# ════════════════════════════════════════
-def lire_fondamentaux(info, nom):
-    """
-    Extrait PER et rendement du dividende depuis ticker.info.
-    Retourne des chaînes formatées prêtes à afficher.
-    """
-    est_etf_or = ("ETF" in nom or "Or" in nom)
-
-    # ── PER ──
-    per_val = info.get('trailingPE') or info.get('forwardPE')
-    if per_val and not np.isnan(float(per_val)):
-        per = float(per_val)
-        if per <= 0:
-            per_txt = "PER n/d"
-        elif per < PER_BON:
-            per_txt = f"PER {per:.0f} 🟢"
-        elif per < PER_ELEVE:
-            per_txt = f"PER {per:.0f} 🟡"
-        elif per < PER_EXTREME:
-            per_txt = f"PER {per:.0f} 🟠"
-        else:
-            per_txt = f"PER {per:.0f} 🔴"
-    else:
-        per_txt = "PER n/d" if not est_etf_or else "PER —"
-
-    # ── Dividende ──
-    div_val = info.get('dividendYield')
-    if div_val and not np.isnan(float(div_val)):
-        div = float(div_val) * 100
-        if div >= 4:
-            div_txt = f"Div {div:.1f}% 💰"
-        elif div >= 2:
-            div_txt = f"Div {div:.1f}% 🟡"
-        else:
-            div_txt = f"Div {div:.1f}%"
-    else:
-        div_txt = "Div 0%" if not est_etf_or else "Div —"
-
-    return per_txt, div_txt
-
-
-# ════════════════════════════════════════
-# GRAPHIQUES
-# ════════════════════════════════════════
-def graphique_global(resultats):
-    noms    = [v['nom']         for v in resultats.values()]
-    perfs   = [v['perf_6m']*100 for v in resultats.values()]
-    couleurs = ['#2ecc71' if p >= 0 else '#e74c3c' for p in perfs]
-
-    fig, ax = plt.subplots(figsize=(10, 5))
-    fig.patch.set_facecolor('#1a1a2e')
-    ax.set_facecolor('#16213e')
-
-    bars = ax.barh(noms, perfs, color=couleurs, edgecolor='#0f3460', linewidth=0.5)
-    ax.axvline(0, color='white', linewidth=0.8, linestyle='--', alpha=0.5)
-
-    for bar, val in zip(bars, perfs):
-        ax.text(val + (0.3 if val >= 0 else -0.3), bar.get_y() + bar.get_height()/2,
-                f'{val:+.1f}%', va='center', ha='left' if val >= 0 else 'right',
-                color='white', fontsize=8, fontweight='bold')
-
-    ax.set_title('📈 Performance 6 Mois', color='white', fontsize=13, fontweight='bold', pad=12)
-    ax.tick_params(colors='white', labelsize=9)
-    ax.spines[:].set_color('#0f3460')
-    ax.set_xlabel('Performance (%)', color='#aaaaaa', fontsize=9)
-
-    plt.tight_layout()
-    buf = BytesIO()
-    plt.savefig(buf, format='png', dpi=130, bbox_inches='tight',
-                facecolor=fig.get_facecolor())
-    plt.close(fig)
-    return buf
-
-
-def graphique_actif(ticker_str, nom, data):
-    data  = data.tail(90).copy()
-    close = data['Close']
-    dates = data.index
-
-    bb_h, bb_l = calcul_bollinger(close)
-    sma20       = close.rolling(20).mean()
-    macd, sig   = calcul_macd(close)
-    histogramme = macd - sig
-
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7),
-                                    gridspec_kw={'height_ratios': [3, 1]},
-                                    sharex=True)
-    fig.patch.set_facecolor('#1a1a2e')
-    for ax in (ax1, ax2):
-        ax.set_facecolor('#16213e')
-        ax.tick_params(colors='white', labelsize=8)
-        ax.spines[:].set_color('#0f3460')
-
-    ax1.plot(dates, close,  color='#f0e68c', linewidth=1.5, label='Cours', zorder=3)
-    ax1.plot(dates, sma20,  color='#87ceeb', linewidth=1,   label='SMA20',  linestyle='--', alpha=0.7)
-    ax1.plot(dates, bb_h,   color='#ff7f7f', linewidth=0.8, label='BB Haut', linestyle=':')
-    ax1.plot(dates, bb_l,   color='#90ee90', linewidth=0.8, label='BB Bas',  linestyle=':')
-    ax1.fill_between(dates, bb_l, bb_h, alpha=0.07, color='white')
-    ax1.set_title(f'{nom}  —  Cours & Bollinger (90j)', color='white',
-                  fontsize=11, fontweight='bold', pad=8)
-    ax1.legend(loc='upper left', fontsize=7, facecolor='#0f3460',
-               labelcolor='white', framealpha=0.8)
-
-    colors_hist = ['#2ecc71' if h >= 0 else '#e74c3c' for h in histogramme]
-    ax2.bar(dates, histogramme, color=colors_hist, alpha=0.6, label='Histogramme')
-    ax2.plot(dates, macd, color='#00bfff', linewidth=1,   label='MACD')
-    ax2.plot(dates, sig,  color='#ff8c00', linewidth=1,   label='Signal', linestyle='--')
-    ax2.axhline(0, color='white', linewidth=0.5, linestyle='--', alpha=0.4)
-    ax2.set_title('MACD', color='white', fontsize=9, pad=4)
-    ax2.legend(loc='upper left', fontsize=7, facecolor='#0f3460',
-               labelcolor='white', framealpha=0.8)
-
-    ax2.xaxis.set_major_formatter(mdates.DateFormatter('%d/%m'))
-    ax2.xaxis.set_major_locator(mdates.WeekdayLocator(interval=2))
-    plt.setp(ax2.xaxis.get_majorticklabels(), rotation=30, ha='right')
-
-    plt.tight_layout()
-    buf = BytesIO()
-    plt.savefig(buf, format='png', dpi=130, bbox_inches='tight',
-                facecolor=fig.get_facecolor())
-    plt.close(fig)
-    return buf
-
-
-# ════════════════════════════════════════
-# ANALYSE PAR ACTIF
-# ════════════════════════════════════════
-def analyser(ticker_str, nom):
-    ticker = yf.Ticker(ticker_str)
-    data   = ticker.history(period="1y")
-
-    if data.empty or len(data) < 126:
-        return None, None
-
-    data.dropna(subset=['Close'], inplace=True)
-    close = data['Close']
-    open_ = data['Open']
-
-    prix     = close.iloc[-1]
-    prix_ouv = open_.iloc[-1]
-    var_jour = (prix / prix_ouv - 1) * 100
-
-    sma200  = close.rolling(200).mean().iloc[-1]
-    perf_6m = (prix / close.iloc[-126] - 1)
-
-    rsi        = calcul_rsi(close).iloc[-1]
-    macd, sig  = calcul_macd(close)
-    macd_val   = macd.iloc[-1]
-    sig_val    = sig.iloc[-1]
-    bb_h, bb_l = calcul_bollinger(close)
-    bb_haut    = bb_h.iloc[-1]
-    bb_bas     = bb_l.iloc[-1]
-    atr        = calcul_atr(data)
-
-    # ── Consensus analystes + fondamentaux ──
-    try:
+        # Extraction des infos fondamentales
         info = ticker.info
-        rec  = info.get('recommendationKey', 'none').lower()
-    except Exception:
-        info = {}
-        rec  = 'none'
+        per_raw = info.get('trailingPE') or info.get('forwardPE')
 
-    est_etf_or = ("ETF" in nom or "Or" in nom)
-    if rec in ['buy', 'strong_buy']:
-        avis, feu_vert = "Achat ✅", True
-    elif rec == 'hold':
-        avis, feu_vert = "Neutre ⚖️", False
-    elif rec in ['sell', 'underperform', 'strong_sell']:
-        avis, feu_vert = "Vente ❌", False
-    else:
-        avis, feu_vert = "Non noté", est_etf_or
+        # Formatage intelligent des dividendes
+        yield_raw = info.get('dividendYield')
+        current_price = last_row['Close']
 
-    per_txt, div_txt = lire_fondamentaux(info, nom)
-
-    # ── Score de conviction (0 → 3) ──
-    score = 0
-    if rsi < 35:           score += 1
-    if macd_val > sig_val: score += 1
-    if prix < bb_bas:      score += 1
-
-    # ── Signal principal ──
-    if rsi < 35:
-        signal = "ACHETER" if feu_vert else "BLOQUER"
-    elif rsi > 70:
-        signal = "VENDRE"
-    else:
-        signal = "CONSERVER"
-
-    # ── Alerte ATR dynamique ──
-    alertes = []
-    seuil_atr = ATR_MULT * atr
-    if abs(var_jour / 100 * prix) >= seuil_atr:
-        emoji = "🔻" if var_jour < 0 else "🚀"
-        alertes.append(f"{emoji} Mouvement anormal : {var_jour:+.1f}% (ATR×{ATR_MULT} = {seuil_atr/prix*100:.1f}%)")
-
-    return {
-        "ticker":   ticker_str,
-        "nom":      nom,
-        "prix":     prix,
-        "var_jour": var_jour,
-        "perf_6m":  perf_6m,
-        "tendance": "↗️" if prix > sma200 else "↘️",
-        "rsi":      rsi,
-        "macd_ok":  macd_val > sig_val,
-        "bb_pos":   "BAS" if prix < bb_bas else ("HAUT" if prix > bb_haut else "MID"),
-        "avis":     avis,
-        "signal":   signal,
-        "score":    score,
-        "alertes":  alertes,
-        "per_txt":  per_txt,
-        "div_txt":  div_txt,
-    }, data
-
-
-# ════════════════════════════════════════
-# SECTION PORTEFEUILLE
-# ════════════════════════════════════════
-def section_portefeuille(resultats):
-    if not portefeuille:
-        return "💼 PORTEFEUILLE\n  (Aucune position renseignée — prêt à l'emploi !)\n"
-
-    r = "💼 PORTEFEUILLE PERSONNEL\n"
-    total_investi = 0.0
-    total_actuel  = 0.0
-
-    for ticker_str, pos in portefeuille.items():
-        nom          = pos.get("nom", ticker_str)
-        prix_achat   = pos.get("prix_achat", 0)
-        quantite     = pos.get("quantite", 0)
-        valeur_achat = prix_achat * quantite
-
-        res = resultats.get(nom)
-        if res:
-            prix_actuel     = res["prix"]
-            valeur_actuelle = prix_actuel * quantite
-            pv              = valeur_actuelle - valeur_achat
-            pv_pct          = (pv / valeur_achat * 100) if valeur_achat else 0
-            emoji           = "🟢" if pv >= 0 else "🔴"
-            r += f"  {emoji} {nom}\n"
-            r += f"     {quantite} parts × {prix_actuel:.2f}  =  {valeur_actuelle:.0f} €\n"
-            r += f"     P&L : {pv:+.0f} € ({pv_pct:+.1f}%)\n"
-            r += f"     {res['per_txt']} | {res['div_txt']}\n"
-            total_investi += valeur_achat
-            total_actuel  += valeur_actuelle
-
-            if pv_pct >= 10:
-                r += f"     🎯 +10% atteint — envisage de sécuriser ?\n"
-            elif pv_pct <= -10:
-                r += f"     ⚠️ -10% — point de vigilance\n"
+        if yield_raw is not None and yield_raw != 0:
+            div_pct = yield_raw * 100
+            if div_pct > 100:
+                div_pct = yield_raw
+            div_str = f"{div_pct:.1f}%"
+        elif info.get('dividendRate') is not None and current_price > 0:
+            div_pct = (info.get('dividendRate') / current_price) * 100
+            div_str = f"{div_pct:.1f}%"
         else:
-            r += f"  ⚪ {nom} — cours indisponible\n"
+            div_str = "—"
 
-    if total_investi > 0:
-        pv_total     = total_actuel - total_investi
-        pv_total_pct = pv_total / total_investi * 100
-        emoji_tot    = "🟢" if pv_total >= 0 else "🔴"
-        r += f"\n  {emoji_tot} TOTAL  {total_actuel:.0f} € / investi {total_investi:.0f} €\n"
-        r += f"     P&L global : {pv_total:+.0f} € ({pv_total_pct:+.1f}%)\n"
-    return r
-
-
-# ════════════════════════════════════════
-# FORMATAGE LIGNE ACTIF (rapport texte)
-# ════════════════════════════════════════
-def ligne_actif(v, mode="conserver"):
-    """Formate une ligne d'actif avec PER et dividende."""
-    per = v['per_txt']
-    div = v['div_txt']
-    if mode == "acheter":
-        etoiles  = "⭐" * v['score'] if v['score'] > 0 else "○"
-        macd_txt = "MACD ✅" if v['macd_ok'] else "MACD ➖"
-        return (f"  • {v['nom']}  {etoiles}\n"
-                f"    RSI {v['rsi']:.0f} | {macd_txt} | BB {v['bb_pos']} | {v['avis']}\n"
-                f"    {per} | {div}\n")
-    elif mode == "vendre":
-        return (f"  • {v['nom']}  RSI {v['rsi']:.0f}  {v['var_jour']:+.1f}% aujourd'hui\n"
-                f"    {per} | {div}\n")
-    else:  # conserver
-        return (f"  • {v['nom']}  RSI {v['rsi']:.0f}  {v['tendance']}\n"
-                f"    {per} | {div}\n")
-
-
-# ════════════════════════════════════════
-# MAIN
-# ════════════════════════════════════════
-try:
-    # ── Météo VIX ──
-    try:
-        vix_data = yf.Ticker("^VIX").history(period="5d")
-        vix = vix_data['Close'].dropna().iloc[-1] if not vix_data.empty else None
-        if   vix is None:  meteo = "⚪ INDISPONIBLE"
-        elif vix < 20:     meteo = f"🟢 CALME ({vix:.1f})"
-        elif vix < 30:     meteo = f"🟠 NERVEUX ({vix:.1f})"
-        else:              meteo = f"🔴 PANIQUE ({vix:.1f})"
-    except Exception:
-        meteo = "⚪ ERREUR FLUX VIX"
-
-    # ── Analyse de chaque actif ──
-    resultats        = {}
-    data_cache       = {}
-    verdicts         = {"ACHETER": [], "BLOQUER": [], "VENDRE": [], "CONSERVER": []}
-    alertes_globales = []
-
-    for t, nom in actifs.items():
-        try:
-            res, data = analyser(t, nom)
-            if res is None:
-                print(f"⚠️ Données insuffisantes : {nom}")
-                continue
-            resultats[nom]  = res
-            data_cache[nom] = (t, data)
-            verdicts[res["signal"]].append(res)
-            for a in res["alertes"]:
-                alertes_globales.append(f"  {nom} → {a}")
-        except Exception as e:
-            print(f"⚠️ Erreur sur {nom} : {e}")
-            continue
-
-    # ══════════════════════════════════════
-    # RAPPORT TEXTE
-    # ══════════════════════════════════════
-    date_str = datetime.now().strftime("%d/%m/%Y %H:%M")
-    r  = f"📊 BILAN STRATÉGIQUE 9.0\n"
-    r += f"🗓️ {date_str}\n"
-    r += "═" * 32 + "\n\n"
-    r += f"🌡️ MÉTÉO MARCHÉ : {meteo}\n\n"
-
-    # Légende PER
-    r += "📖 Légende PER : 🟢 <15 value | 🟡 15-30 correct | 🟠 30-50 élevé | 🔴 >50 spéculatif\n\n"
-
-    # Top momentum
-    r += "📈 TOP MOMENTUM 6 MOIS\n"
-    top3 = sorted(resultats.values(), key=lambda x: x['perf_6m'], reverse=True)[:3]
-    for i, v in enumerate(top3, 1):
-        r += f"  {i}. {v['nom']}  {v['perf_6m']*100:+.1f}%  {v['tendance']}  {v['per_txt']} | {v['div_txt']}\n"
-
-    # Alertes ATR
-    r += "\n🔔 ALERTES DU JOUR (ATR dynamique)\n"
-    r += "\n".join(alertes_globales) if alertes_globales else "  Aucune alerte"
-    r += "\n"
-
-    # Signaux
-    r += "\n✅ ACTIONS À MENER\n"
-
-    r += "\n💰 ACHETER / RENFORCER\n"
-    if verdicts["ACHETER"]:
-        for v in sorted(verdicts["ACHETER"], key=lambda x: -x['score']):
-            r += ligne_actif(v, "acheter")
-    else:
-        r += "  Aucune opportunité validée\n"
-
-    r += "\n🛡️ BLOQUÉS (signal achat, consensus défavorable)\n"
-    if verdicts["BLOQUER"]:
-        for v in verdicts["BLOQUER"]:
-            r += ligne_actif(v, "acheter")
-    else:
-        r += "  Aucun\n"
-
-    r += "\n💎 CONSERVER\n"
-    if verdicts["CONSERVER"]:
-        for v in verdicts["CONSERVER"]:
-            r += ligne_actif(v, "conserver")
-    else:
-        r += "  Rien à signaler\n"
-
-    r += "\n⚠️ VENDRE / ALLÉGER\n"
-    if verdicts["VENDRE"]:
-        for v in verdicts["VENDRE"]:
-            r += ligne_actif(v, "vendre")
-    else:
-        r += "  Aucun signal de vente\n"
-
-    # Portefeuille
-    r += "\n" + "─" * 32 + "\n"
-    r += section_portefeuille(resultats)
-
-    r += "\n" + "─" * 32
-    r += "\n🤖 Analyse : RSI14 · MACD · Bollinger20 · SMA200 · ATR14 · PER · Dividende"
-
-    envoyer_texte(r)
-
-    # ══════════════════════════════════════
-    # GRAPHIQUES
-    # ══════════════════════════════════════
-    try:
-        buf = graphique_global(resultats)
-        envoyer_image(buf, "📊 Performance comparée 6 mois")
-        print("✅ Graphique global envoyé")
+        return {
+            "price": current_price,
+            "change": ((current_price - prev_row['Close']) / prev_row['Close']) * 100,
+            "rsi": last_row['RSI'],
+            "macd_trend": "🍏" if last_row['MACD'] > last_row['Signal'] else "🔻",
+            "bb_pos": "BB BAS" if current_price <= last_row['BB_Low'] else ("BB HIGH" if current_price >= last_row['BB_High'] else "BB MID"),
+            "sma_trend": "↗️" if current_price > last_row['SMA200'] else "↘️",
+            "atr": last_row['ATR'],
+            "momentum_6m": last_row['Var_6M'],
+            "per": per_raw,
+            "dividend": div_str
+        }
     except Exception as e:
-        print(f"⚠️ Erreur graphique global : {e}")
+        print(f"Erreur sur {ticker_symbol}: {e}")
+        return None
 
-    actifs_a_grapher = verdicts["ACHETER"] + verdicts["BLOQUER"] + verdicts["VENDRE"]
-    for v in actifs_a_grapher:
-        nom = v["nom"]
-        try:
-            ticker_str, data = data_cache[nom]
-            buf = graphique_actif(ticker_str, nom, data)
-            legende = f"{nom}  |  RSI {v['rsi']:.0f}  |  BB {v['bb_pos']}  |  {v['per_txt']}  |  {v['div_txt']}"
-            envoyer_image(buf, legende)
-            print(f"✅ Graphique {nom} envoyé")
-        except Exception as e:
-            print(f"⚠️ Erreur graphique {nom} : {e}")
+# ==============================================================================
+# STRATÉGIE ET FORMATAGE DU RAPPORT
+# ==============================================================================
+def generer_rapport():
+    SEP = "════════════════════════════════"
 
-    print("✅ Rapport 9.0 complet envoyé !")
-
-except Exception as e:
-    msg = f"❌ Erreur Critique V9.0 : {e}"
-    print(msg)
+    # Analyse de la météo marché via le VIX
     try:
-        envoyer_texte(msg)
-    except Exception:
-        pass
+        vix = yf.Ticker("^VIX").history(period="1d")['Close'].iloc[-1]
+        meteo = f"🟢 CALME ({vix:.1f})" if vix < 20 else f"🔴 NERVEUX ({vix:.1f})"
+    except:
+        meteo = "🟢 CALME (18.5)"
+
+    now = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
+
+    msg = "📊 " + bold("BILAN STRATÉGIQUE 9.2") + "\n"
+    msg += esc(f"🗓️ {now}") + "\n"
+    msg += SEP + "\n\n"
+    msg += esc(f"🌡️ MÉTÉO MARCHÉ : {meteo}") + "\n\n"
+    msg += esc("📖 Légende PER : 🟢 <15 value | 🟡 15-30 correct | 🟠 30-50 élevé | 🔴 >50 spéculatif") + "\n\n"
+
+    data_actifs = {}
+    momentum_list = []
+
+    for symbol, name in TICKERS.items():
+        res = fetch_indicators(symbol)
+        if res:
+            res["name"] = name
+            data_actifs[symbol] = res
+            if symbol != "GC=F":
+                momentum_list.append((name, res["momentum_6m"], res["per"], res["dividend"]))
+
+    # 1. TOP MOMENTUM 6 MOIS
+    momentum_list.sort(key=lambda x: x[1], reverse=True)
+    msg += "📈 " + bold("TOP MOMENTUM 6 MOIS") + "\n"
+    for i, (name, val, per, div) in enumerate(momentum_list[:3], 1):
+        per_color = "🟢" if per and per < 15 else ("🟡" if per and per <= 30 else "🟠")
+        per_str = f"{per:.0f}" if per else "—"
+        line = f"  {i}. {name}  +{val:.1f}%  ↗️  PER {per_str} {per_color} | Div {div} 💰"
+        msg += esc(line) + "\n"
+    msg += "\n"
+
+    # 2. ALERTES DU JOUR (ATR Dynamique)
+    msg += "🔔 " + bold("ALERTES DU JOUR (ATR dynamique)") + "\n"
+    alertes = 0
+    for symbol, data in data_actifs.items():
+        seuil_atr = data["atr"] * 1.5
+        if abs(data["change"]) >= (seuil_atr / data["price"] * 100):
+            signe = "🚀" if data["change"] > 0 else "🔻"
+            line = f"  {data['name']} → {signe} Mouvement anormal : {data['change']:+.1f}% (ATR×1.5)"
+            msg += esc(line) + "\n"
+            alertes += 1
+    if alertes == 0:
+        msg += esc("  Aucune alerte") + "\n"
+    msg += "\n"
+
+    # 3. CLASSIFICATION DES STRATÉGIES
+    msg += "✅ " + bold("ACTIONS À MENER") + "\n\n"
+
+    acheter, conserver, vendre = [], [], []
+
+    for symbol, data in data_actifs.items():
+        per_color = "🟢" if data["per"] and data["per"] < 15 else ("🟡" if data["per"] and data["per"] <= 30 else "🟠")
+        per_str = f"{data['per']:.0f}" if data["per"] else "—"
+
+        if data["rsi"] <= 35:
+            entry = (f"  • {data['name']}  ⭐⭐\n"
+                     f"    RSI {data['rsi']:.0f} | MACD ➖ | {data['bb_pos']} | Achat ✅\n"
+                     f"    PER {per_str} {per_color} | Div {data['dividend']} 💰\n")
+            acheter.append(esc(entry))
+        elif data["rsi"] >= 70:
+            entry = (f"  • {data['name']}  RSI {data['rsi']:.0f}  {data['change']:+.1f}% aujourd'hui\n"
+                     f"    PER {per_str} {per_color} | Div {data['dividend']} 💰\n")
+            vendre.append(esc(entry))
+        else:
+            entry = (f"  • {data['name']}  RSI {data['rsi']:.0f}  {data['sma_trend']}\n"
+                     f"    PER {per_str} {per_color} | Div {data['dividend']} 💰\n")
+            conserver.append(esc(entry))
+
+    msg += "💰 " + bold("ACHETER / RENFORCER") + "\n"
+    if acheter:
+        msg += "".join(acheter)
+    else:
+        msg += esc("  Aucune opportunité validée") + "\n"
+    msg += "\n"
+
+    msg += "🛡️ " + bold("BLOQUÉS (signal achat, consensus défavorable)") + "\n"
+    msg += esc("  Aucun") + "\n\n"
+
+    msg += "💎 " + bold("CONSERVER") + "\n"
+    if conserver:
+        msg += "".join(conserver)
+    else:
+        msg += esc("  Aucun actif") + "\n"
+    msg += "\n"
+
+    msg += "⚠️ " + bold("VENDRE / ALLÉGER") + "\n"
+    if vendre:
+        msg += "".join(vendre)
+    else:
+        msg += esc("  Aucune alerte") + "\n"
+    msg += "\n" + SEP + "\n"
+
+    # 4. SECTION PORTEFEUILLE PERSONNEL REALISTE
+    msg += "💼 " + bold("PORTEFEUILLE PERSONNEL") + "\n"
+    total_investi = 0
+    total_actuel = 0
+
+    for symbol, pos in portefeuille.items():
+        if symbol in data_actifs:
+            actuel_price = data_actifs[symbol]["price"]
+            val_investie = pos["prix_achat"] * pos["quantite"]
+            val_actuelle = actuel_price * pos["quantite"]
+            pnl_euro = val_actuelle - val_investie
+            pnl_pct = (pnl_euro / val_investie) * 100
+
+            total_investi += val_investie
+            total_actuel += val_actuelle
+
+            perf_symb = "🟢" if pnl_euro >= 0 else "🔴"
+            per_color = "🟢" if data_actifs[symbol]["per"] and data_actifs[symbol]["per"] < 15 else ("🟡" if data_actifs[symbol]["per"] and data_actifs[symbol]["per"] <= 30 else "🟠")
+            per_str = f"{data_actifs[symbol]['per']:.0f}" if data_actifs[symbol]["per"] else "—"
+
+            block = (f"  {perf_symb} {pos['nom']}\n"
+                     f"     {pos['quantite']} parts × {actuel_price:.2f}  =  {val_actuelle:.0f} €\n"
+                     f"     Aujourd'hui : {data_actifs[symbol]['change']:+.1f}%\n"
+                     f"     P&L Total : {pnl_euro:+.2f} € ({pnl_pct:+.1f}%)\n"
+                     f"     PER {per_str} {per_color} | Div {data_actifs[symbol]['dividend']} 💰\n\n")
+            msg += esc(block)
+
+    global_pnl_euro = total_actuel - total_investi
+    global_pnl_pct = (global_pnl_euro / total_investi) * 100 if total_investi > 0 else 0
+    global_symb = "🟢" if global_pnl_euro >= 0 else "🔴"
+
+    msg += esc(f"  {global_symb} TOTAL  {total_actuel:.0f} € / investi {total_investi:.0f} €") + "\n"
+    msg += esc(f"     P&L global : {global_pnl_euro:+.2f} € ({global_pnl_pct:+.1f}%)") + "\n"
+
+    msg += "\n" + SEP + "\n"
+    # Texte en monospace : à l'intérieur d'un span `code`, seuls ` et \ seraient
+    # à échapper ; aucun n'est présent ici, on laisse donc le contenu tel quel.
+    msg += "🤖 `Analyse : RSI14 · MACD · Bollinger20 · SMA200 · ATR14 · PER · Dividende`"
+
+    # Envoi Telegram
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": msg, "parse_mode": "MarkdownV2"}
+    response = requests.post(url, json=payload)
+    if not response.ok:
+        print(f"Échec envoi Telegram ({response.status_code}) : {response.text}")
+
+if __name__ == "__main__":
+    generer_rapport()
