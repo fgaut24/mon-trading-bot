@@ -149,6 +149,26 @@ def fetch_indicators_and_predict(ticker_symbol):
         df['ATR'] = np.max(ranges, axis=1).rolling(14).mean()
         df['Var_6M'] = df['Close'].pct_change(periods=126) * 100
 
+        # FEATURES ADDITIONNELLES POUR LE MACHINE LEARNING
+        # 4 dimensions orthogonales aux 3 features d'origine (momentum/volatilité court terme)
+
+        # Positionnement dans le range 52 semaines (mean-reversion vs tendance longue)
+        df['High_52W'] = df['High'].rolling(window=252).max()
+        df['Low_52W'] = df['Low'].rolling(window=252).min()
+        range_52w = (df['High_52W'] - df['Low_52W']).clip(lower=1e-9)
+        df['Price_52W_Pct'] = (df['Close'] - df['Low_52W']) / range_52w * 100
+        # 0 % = au plus bas de l'année, 100 % = au plus haut de l'année
+
+        # Force de la tendance moyen-terme : SMA50 vs SMA200 (golden/death cross en %)
+        df['SMA50'] = df['Close'].rolling(window=50).mean()
+        df['SMA50_vs_SMA200'] = (df['SMA50'] - df['SMA200']) / df['SMA200'] * 100
+
+        # Largeur des bandes de Bollinger : régime de volatilité (compression = breakout imminent)
+        df['BB_Width'] = (df['BB_High'] - df['BB_Low']) / df['MA20'] * 100
+
+        # Momentum 1 mois (20 séances) — horizon différent du RSI (14j) et de Var_6M (126j)
+        df['Var_1M'] = df['Close'].pct_change(periods=20) * 100
+
         # 2. ANALYSE DES VOLUMES (OBV)
         if 'Volume' in df.columns and df['Volume'].sum() > 0:
             df['OBV'] = (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
@@ -164,7 +184,8 @@ def fetch_indicators_and_predict(ticker_symbol):
 
         if ML_AVAILABLE:
             df['Target'] = (df['Close'].shift(-5) > df['Close']).astype(int)
-            features = ['RSI', 'MACD_Hist', 'ATR']
+            features = ['RSI', 'MACD_Hist', 'ATR',
+                        'Price_52W_Pct', 'SMA50_vs_SMA200', 'BB_Width', 'Var_1M']
             ml_df = df.dropna(subset=features + ['Target']).copy()
 
             if len(ml_df) > 100:
@@ -239,12 +260,12 @@ def generer_rapport():
 
     now = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
 
-    msg = "📊 " + bold("BILAN STRATÉGIQUE 11.0 (L'Oracle)") + "\n"
+    msg = "📊 " + bold("BILAN STRATÉGIQUE 11.1 (L'Oracle)") + "\n"
     msg += esc(f"🗓️ {now}") + "\n"
     msg += SEP + "\n\n"
     msg += esc(f"🌡️ MÉTÉO MARCHÉ : {meteo}") + "\n\n"
     msg += esc("📖 Score conviction : RSI(3) MACD(2) SMA200(2) IA(2) Vol(1) = /10 — "
-               "IA : indicateur statistique, non prédictif.") + "\n\n"
+               "IA Random Forest : 7 features (RSI · MACD · ATR · 52W · SMA50/200 · BBWidth · Momentum1M).") + "\n\n"
 
     data_actifs = {}
     momentum_list = []
