@@ -1,7 +1,6 @@
 import os
 import json
 import datetime
-import time
 import numpy as np
 import pandas as pd
 import requests
@@ -22,18 +21,76 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "VOTRE_TOKEN_DE_SECOURS")
 CHAT_ID        = os.environ.get("TELEGRAM_CHAT_ID", "VOTRE_CHAT_ID_DE_SECOURS")
 HISTORY_FILE   = Path("predictions_history.json")
 
-TICKERS = {
-    "TTE.PA":  "TotalEnergies 🇪🇺",
-    "MC.PA":   "LVMH 🇪🇺",
-    "AI.PA":   "Air Liquide 🇪🇺",
-    "OR.PA":   "L'Oreal 🇪🇺",
-    "SU.PA":   "Schneider Elec 🇪🇺",
-    "WPEA.PA": "ETF MSCI World 🇪🇺",
-    "AAPL":    "Apple 🇺🇸",
-    "MSFT":    "Microsoft 🇺🇸",
-    "NVDA":    "Nvidia 🇺🇸",
-    "GC=F":    "Or Physique 🪙"
+# ==============================================================================
+# UNIVERS DE SURVEILLANCE — CAC 40 + ETF PEA
+# Composition officielle Euronext (révisée trimestriellement).
+# Dernière mise à jour : décembre 2025 (Eiffage entre, Edenred sort).
+# Si un ticker ne renvoie pas de données yfinance, il est silencieusement ignoré.
+# ==============================================================================
+CAC_40 = {
+    # Luxe & consommation premium
+    "MC.PA":    "LVMH",
+    "RMS.PA":   "Hermès",
+    "OR.PA":    "L'Oreal",
+    "KER.PA":   "Kering",
+    "EL.PA":    "EssilorLuxottica",
+    # Énergie
+    "TTE.PA":   "TotalEnergies",
+    "ENGI.PA":  "Engie",
+    # Industrie, aéro, défense
+    "AIR.PA":   "Airbus",
+    "SAF.PA":   "Safran",
+    "HO.PA":    "Thales",
+    "DG.PA":    "Vinci",
+    "LR.PA":    "Legrand",
+    "SU.PA":    "Schneider Elec",
+    "SGO.PA":   "Saint-Gobain",
+    "ALO.PA":   "Alstom",
+    "FGR.PA":   "Eiffage",
+    # Automobile & matériaux
+    "RNO.PA":   "Renault",
+    "STLAM.MI": "Stellantis",
+    "MT.AS":    "ArcelorMittal",
+    "ML.PA":    "Michelin",
+    "STM.PA":   "STMicro",
+    # Banque & assurance
+    "BNP.PA":   "BNP Paribas",
+    "ACA.PA":   "Crédit Agricole",
+    "GLE.PA":   "Soc. Générale",
+    "CS.PA":    "AXA",
+    # Santé
+    "SAN.PA":   "Sanofi",
+    "AI.PA":    "Air Liquide",
+    "BIM.PA":   "bioMérieux",
+    # Services & utilities
+    "VIE.PA":   "Veolia",
+    "ORA.PA":   "Orange",
+    "EN.PA":    "Bouygues",
+    "URW.PA":   "Unibail",
+    # Tech & médias
+    "CAP.PA":   "Capgemini",
+    "DSY.PA":   "Dassault Sys.",
+    "PUB.PA":   "Publicis",
+    "WLN.PA":   "Worldline",
+    # Consommation courante
+    "BN.PA":    "Danone",
+    "CA.PA":    "Carrefour",
+    "RI.PA":    "Pernod Ricard",
+    "VIV.PA":   "Vivendi",
 }
+
+ETF_PEA = {
+    # Indices larges — éligibles PEA via réplication synthétique
+    "WPEA.PA":  "ETF MSCI World",
+    "CW8.PA":   "ETF Monde CW8",
+    "PANX.PA":  "ETF Nasdaq-100",
+    "PSP5.PA":  "ETF S&P 500",
+    "PAEEM.PA": "ETF Émergents",
+    "MEUD.PA":  "ETF Europe 600",
+    "CACC.PA":  "ETF CAC 40",
+}
+
+TICKERS = {**CAC_40, **ETF_PEA}   # 47 actifs au total
 
 portefeuille = {
     "MC.PA": {"nom": "LVMH", "prix_achat": 458.45, "quantite": 1}
@@ -49,6 +106,32 @@ def esc(text):
 
 def bold(text):
     return f"*{esc(text)}*"
+
+# ==============================================================================
+# ENVOI TELEGRAM (supporte les messages > 4 096 car. en les découpant)
+# ==============================================================================
+def envoyer_telegram(texte, chat_id, token):
+    """Envoie un ou plusieurs messages Telegram si le texte dépasse 4 096 car."""
+    LIMIT = 4000  # marge de sécurité sous la limite officielle
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    blocs = []
+
+    while len(texte) > LIMIT:
+        # Coupe au dernier saut de ligne avant la limite
+        coupe = texte.rfind("\n", 0, LIMIT)
+        if coupe == -1:
+            coupe = LIMIT
+        blocs.append(texte[:coupe])
+        texte = texte[coupe:].lstrip("\n")
+    blocs.append(texte)
+
+    for i, bloc in enumerate(blocs, 1):
+        payload = {"chat_id": chat_id, "text": bloc, "parse_mode": "MarkdownV2"}
+        r = requests.post(url, json=payload)
+        if not r.ok:
+            print(f"Échec message {i}/{len(blocs)} ({r.status_code}) : {r.text}")
+        else:
+            print(f"✅ Message {i}/{len(blocs)} envoyé ({len(bloc)} car.)")
 
 # ==============================================================================
 # SCORE DE CONVICTION COMPOSITE (0 → 10)
@@ -84,148 +167,108 @@ def score_emoji(score):
     else:            return "🔴"
 
 # ==============================================================================
-# INTERPRÉTATION PÉDAGOGIQUE EN FRANÇAIS COURANT
+# INTERPRÉTATION PÉDAGOGIQUE
 # ==============================================================================
 def nom_court(name):
-    """Retourne le nom sans le drapeau (pour les phrases)."""
-    for flag in [" 🇪🇺", " 🇺🇸", " 🪙"]:
-        name = name.replace(flag, "")
     return name.strip()
 
 def interpreter_rsi(rsi):
-    if   rsi <= 35: return "zone de survente — rebond potentiel"
-    elif rsi <= 45: return "RSI bas — titre délaissé par le marché"
+    if   rsi <= 35: return "survente — rebond potentiel"
+    elif rsi <= 45: return "RSI bas — délaissé"
     elif rsi <= 55: return "RSI neutre"
-    elif rsi <= 65: return "RSI un peu tendu"
+    elif rsi <= 65: return "RSI tendu"
     elif rsi <= 75: return "surachat modéré"
-    else:           return "surachat marqué — montée trop rapide"
+    else:           return "surachat marqué"
 
 def interpreter_ia(data):
-    if not data.get("ml_ok"):
-        return None
+    if not data.get("ml_ok"): return None
     p = data["prob_up"]
     if   p >= 70: return f"IA très favorable ({p:.0f}%)"
     elif p >= 55: return f"IA favorable ({p:.0f}%)"
     elif p <= 30: return f"IA très défavorable ({p:.0f}%)"
     elif p <= 45: return f"IA défavorable ({p:.0f}%)"
-    return None  # Zone neutre (45–55 %) : pas mentionné
+    return None
 
 def interpreter_signal(data):
-    """Phrase synthétique lisible résumant le profil de l'actif."""
     parts = [interpreter_rsi(data["rsi"])]
-    parts.append("tendance haussière" if data["sma_trend"] == "↗️" else "tendance baissière")
+    parts.append("tendance ↗️" if data["sma_trend"] == "↗️" else "tendance ↘️")
     ia = interpreter_ia(data)
-    if ia:
-        parts.append(ia)
-    if data["vol_trend"] == "📈":
-        parts.append("volumes en hausse")
+    if ia: parts.append(ia)
+    if data["vol_trend"] == "📈": parts.append("volumes ↑")
     return " · ".join(parts)
 
 def verdict_action(data, conv):
-    """
-    Verdict explicite (ACHETER / RENFORCER / CONSERVER / ALLÉGER / VENDRE)
-    avec seuils indicatifs calculés depuis l'ATR de l'actif.
-    ⚠️ Signaux techniques uniquement — pas un conseil financier personnel.
-    """
     rsi  = data["rsi"]
     prix = data["price"]
     atr  = data["atr"]
+    entree   = round(prix - 0.5 * atr, 2)
+    objectif = round(prix + 2.5 * atr, 2)
+    stop     = round(prix - 1.5 * atr, 2)
 
-    # Niveaux ATR propres à chaque actif (volatilité normalisée)
-    entree  = round(prix - 0.5 * atr, 2)   # entrée sur léger repli
-    objectif = round(prix + 2.5 * atr, 2)  # objectif R:R ≈ 1:1.7
-    stop    = round(prix - 1.5 * atr, 2)   # seuil de protection
-
-    # ── Acheter ──────────────────────────────────────────────────────────────
     if rsi <= 35 and conv >= 7:
         return (f"🟢 ACHETER — signal fort\n"
-                f"   J'entre à {prix:.2f} € ou sur repli vers {entree:.2f} €\n"
+                f"   J'entre à {prix:.2f} € ou repli vers {entree:.2f} €\n"
                 f"   Je vise {objectif:.2f} €  ·  Je coupe sous {stop:.2f} €")
-
     if rsi <= 35 and conv >= 5:
         return (f"🟢 ACHETER — signal modéré\n"
                 f"   J'entre si le prix tient au-dessus de {stop:.2f} €\n"
                 f"   Je vise {objectif:.2f} €  ·  Je coupe sous {stop:.2f} €")
-
     if rsi <= 35:
-        return (f"👁️ SURVEILLER — survente mais signaux mixtes\n"
-                f"   J'attends que la tendance se stabilise avant d'entrer.\n"
-                f"   Je reviens si la conviction remonte au-dessus de 5/10.")
-
-    # ── Renforcer ────────────────────────────────────────────────────────────
+        return (f"👁️ SURVEILLER — survente, signaux mixtes\n"
+                f"   J'attends stabilisation. Je reviens si conviction > 5/10.")
     if rsi <= 45 and conv >= 7:
         return (f"🔵 RENFORCER sur repli\n"
-                f"   J'attends un retour vers {entree:.2f} € pour entrer\n"
+                f"   J'attends un retour vers {entree:.2f} €\n"
                 f"   Je vise {objectif:.2f} €  ·  Je coupe sous {stop:.2f} €")
-
     if rsi <= 45 and conv >= 5:
         return (f"💎 CONSERVER — profil intéressant\n"
-                f"   Je renforce si le prix descend vers {entree:.2f} €\n"
+                f"   Je renforce si repli vers {entree:.2f} €\n"
                 f"   Je coupe sous {stop:.2f} €")
-
-    # ── Vendre / Alléger ─────────────────────────────────────────────────────
     if rsi >= 70 and conv <= 3:
         return (f"🔴 VENDRE — convergence baissière\n"
-                f"   Je vends maintenant — tous les signaux s'alignent à la baisse.\n"
-                f"   Je reviens si le RSI repasse sous 50.")
-
+                f"   Je vends maintenant. Je reviens si RSI < 50.")
     if rsi >= 70 and conv <= 5:
         return (f"🟠 ALLÉGER — surachat confirmé\n"
                 f"   Je réduis 30 à 50 % de ma position.\n"
                 f"   Si RSI < 65 demain je conserve le reste, sinon je réduis encore.")
-
     if rsi >= 70:
-        return (f"🟡 ATTENTION — surachat mais tendance forte\n"
-                f"   Je ne renforce pas. Je protège mes gains avec un stop à {stop:.2f} €")
-
-    # ── Tendu mais pas encore en vente ───────────────────────────────────────
+        return (f"🟡 ATTENTION — surachat, tendance forte\n"
+                f"   Je ne renforce pas. Stop à {stop:.2f} €")
     if rsi >= 65:
         return (f"🟡 ATTENDRE — zone tendue\n"
-                f"   Je n'achète pas maintenant. Je reviens si RSI repasse sous 60.")
-
-    # ── Conserver ────────────────────────────────────────────────────────────
+                f"   Je n'achète pas. Je reviens si RSI < 60.")
     if conv >= 6:
         return (f"💎 CONSERVER — profil favorable\n"
-                f"   Je renforce uniquement sur repli vers {entree:.2f} €\n"
+                f"   Je renforce sur repli vers {entree:.2f} €\n"
                 f"   Je coupe sous {stop:.2f} €")
-
     if conv >= 4:
         return "💎 CONSERVER — je ne change rien pour l'instant"
-
     return (f"🟡 PRUDENCE — signaux faibles\n"
-            f"   J'envisage d'alléger si ma position est importante.")
+            f"   J'envisage d'alléger si position importante.")
 
 def generer_resume_executif(data_actifs):
-    """3 à 4 points clés du jour en français, pour lecture rapide."""
     sorted_items = sorted(data_actifs.items(),
                           key=lambda x: conviction_score(x[1]), reverse=True)
     lines = []
-
-    achats   = [(s, d) for s, d in sorted_items if d["rsi"] <= 38]
-    ventes   = [(s, d) for s, d in sorted_items if d["rsi"] >= 70]
-    top_conv = [(s, d) for s, d in sorted_items
+    achats   = [(s,d) for s,d in sorted_items if d["rsi"] <= 38]
+    ventes   = [(s,d) for s,d in sorted_items if d["rsi"] >= 70]
+    top_conv = [(s,d) for s,d in sorted_items
                 if conviction_score(d) >= 7 and d["rsi"] < 70]
-
     if achats:
-        noms = " et ".join(nom_court(d["name"]) for _, d in achats)
+        noms = " et ".join(d["name"] for _,d in achats[:2])
         lines.append(f"⭐ {noms} en zone de survente — entrée potentielle")
     if top_conv:
-        noms = ", ".join(nom_court(d["name"]) for _, d in top_conv[:2])
-        lines.append(f"📌 Conviction maximale du jour : {noms}")
+        noms = ", ".join(d["name"] for _,d in top_conv[:3])
+        lines.append(f"📌 Conviction maximale : {noms}")
     if ventes:
-        noms = ", ".join(nom_court(d["name"]) for _, d in ventes)
-        lines.append(f"⚠️ Surachat à surveiller : {noms}")
+        noms = ", ".join(d["name"] for _,d in ventes[:3])
+        lines.append(f"⚠️ Surachat : {noms}")
     if not lines:
         lines.append("⚪ Aucun signal fort — marché en attente")
-
-    # Leader momentum
-    non_gold = [(s, d) for s, d in sorted_items if s != "GC=F"]
+    non_gold = list(sorted_items)
     if non_gold:
         _, best = max(non_gold, key=lambda x: x[1]["momentum_6m"])
-        lines.append(
-            f"📈 Meilleure dynamique 6 mois : {nom_court(best['name'])} "
-            f"({best['momentum_6m']:+.1f}%)"
-        )
+        lines.append(f"📈 Meilleur momentum 6 mois : {best['name']} ({best['momentum_6m']:+.1f}%)")
     return lines
 
 # ==============================================================================
@@ -237,7 +280,7 @@ def charger_historique():
             with open(HISTORY_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         except (json.JSONDecodeError, IOError) as e:
-            print(f"Avertissement : historique illisible ({e})")
+            print(f"Avertissement historique : {e}")
     return []
 
 def sauvegarder_historique(historique, data_actifs):
@@ -246,12 +289,8 @@ def sauvegarder_historique(historique, data_actifs):
     entry = {
         "date": today,
         "assets": {
-            symbol: {
-                "price":   round(data["price"], 4),
-                "prob_up": round(data["prob_up"], 1)
-            }
-            for symbol, data in data_actifs.items()
-            if data.get("ml_ok")
+            s: {"price": round(d["price"], 4), "prob_up": round(d["prob_up"], 1)}
+            for s, d in data_actifs.items() if d.get("ml_ok")
         }
     }
     historique.append(entry)
@@ -259,9 +298,9 @@ def sauvegarder_historique(historique, data_actifs):
     try:
         with open(HISTORY_FILE, "w", encoding="utf-8") as f:
             json.dump(historique, f, ensure_ascii=False, indent=2)
-        print(f"✅ Historique : {len(entry['assets'])} prédictions sauvegardées ({today})")
+        print(f"✅ Historique : {len(entry['assets'])} prédictions ({today})")
     except IOError as e:
-        print(f"Erreur sauvegarde historique : {e}")
+        print(f"Erreur historique : {e}")
     return historique
 
 def valider_predictions(data_actifs, historique):
@@ -269,15 +308,13 @@ def valider_predictions(data_actifs, historique):
     cutoff = today - datetime.timedelta(days=5)
     candidats = [e for e in historique
                  if datetime.datetime.strptime(e["date"], "%Y-%m-%d").date() <= cutoff]
-    if not candidats:
-        return None
+    if not candidats: return None
     ref = max(candidats, key=lambda e: e["date"])
     ref_date = datetime.datetime.strptime(ref["date"], "%Y-%m-%d").date().strftime("%d/%m/%Y")
     total = correct = 0
     details = []
     for symbol, pred in ref["assets"].items():
-        if symbol not in data_actifs:
-            continue
+        if symbol not in data_actifs: continue
         prix_pred   = pred["price"]
         prix_actuel = data_actifs[symbol]["price"]
         dir_predite = pred["prob_up"] > 50
@@ -285,23 +322,12 @@ def valider_predictions(data_actifs, historique):
         variation   = (prix_actuel - prix_pred) / prix_pred * 100
         ok = (dir_predite == dir_reelle)
         total += 1
-        if ok:
-            correct += 1
-        details.append({
-            "name":      data_actifs[symbol]["name"],
-            "prob_up":   pred["prob_up"],
-            "variation": variation,
-            "ok":        ok
-        })
-    if total == 0:
-        return None
-    return {
-        "ref_date": ref_date,
-        "total":    total,
-        "correct":  correct,
-        "accuracy": correct / total * 100,
-        "details":  details
-    }
+        if ok: correct += 1
+        details.append({"name": data_actifs[symbol]["name"], "prob_up": pred["prob_up"],
+                         "variation": variation, "ok": ok})
+    if total == 0: return None
+    return {"ref_date": ref_date, "total": total, "correct": correct,
+            "accuracy": correct / total * 100, "details": details}
 
 # ==============================================================================
 # CALCUL DES INDICATEURS ET PRÉDICTION ML
@@ -334,11 +360,10 @@ def fetch_indicators_and_predict(ticker_symbol):
         high_low   = df['High'] - df['Low']
         high_close = np.abs(df['High'] - df['Close'].shift())
         low_close  = np.abs(df['Low']  - df['Close'].shift())
-        ranges     = pd.concat([high_low, high_close, low_close], axis=1)
-        df['ATR']    = np.max(ranges, axis=1).rolling(14).mean()
+        df['ATR']    = np.max(pd.concat([high_low, high_close, low_close], axis=1),
+                              axis=1).rolling(14).mean()
         df['Var_6M'] = df['Close'].pct_change(periods=126) * 100
 
-        # Features ML supplémentaires
         df['High_52W'] = df['High'].rolling(window=252).max()
         df['Low_52W']  = df['Low'].rolling(window=252).min()
         range_52w = (df['High_52W'] - df['Low_52W']).clip(lower=1e-9)
@@ -417,31 +442,25 @@ def fetch_indicators_and_predict(ticker_symbol):
         return None
 
 # ==============================================================================
-# GÉNÉRATION DU RAPPORT PÉDAGOGIQUE
+# GÉNÉRATION DU RAPPORT — 2 MESSAGES
+# Message 1 : résumé exécutif + signaux actionnables + portefeuille
+# Message 2 : tableau de bord complet + validation IA
 # ==============================================================================
 def generer_rapport():
     SEP = "════════════════════════════════"
-
     historique = charger_historique()
 
     try:
         vix   = yf.Ticker("^VIX").history(period="1d")['Close'].iloc[-1]
         meteo = f"🟢 CALME ({vix:.1f})" if vix < 20 else f"🔴 NERVEUX ({vix:.1f})"
-        meteo_note = ("Conditions d'analyse favorables." if vix < 20
-                      else "Volatilité élevée — signaux moins fiables.")
+        meteo_note = "Conditions favorables." if vix < 20 else "Volatilité élevée — signaux moins fiables."
     except:
         meteo = "🟢 CALME (18.5)"
-        meteo_note = "Conditions d'analyse favorables."
+        meteo_note = "Conditions favorables."
 
     now = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
 
-    # ── EN-TÊTE ──────────────────────────────────────────────────────────────
-    msg  = "📊 " + bold("ORACLE — Bilan du " + now) + "\n"
-    msg += SEP + "\n"
-    msg += esc(f"🌡️ MÉTÉO MARCHÉ : {meteo}") + "\n"
-    msg += esc(f"   {meteo_note}") + "\n\n"
-
-    # ── Collecte des données ──────────────────────────────────────────────────
+    # ── Collecte des données ─────────────────────────────────────────────────
     data_actifs = {}
     for symbol, name in TICKERS.items():
         res = fetch_indicators_and_predict(symbol)
@@ -449,96 +468,59 @@ def generer_rapport():
             res["name"] = name
             data_actifs[symbol] = res
 
-    validation = valider_predictions(data_actifs, historique)
-
-    # ── RÉSUMÉ EXÉCUTIF ───────────────────────────────────────────────────────
-    msg += bold("CE QU'IL FAUT RETENIR AUJOURD'HUI") + "\n"
-    for line in generer_resume_executif(data_actifs):
-        msg += esc(f"  {line}") + "\n"
-    msg += "\n"
-
-    # ── ÉLAN 6 MOIS (une ligne) ───────────────────────────────────────────────
-    non_gold = [(s, d) for s, d in data_actifs.items() if s != "GC=F"]
-    top3_mom = sorted(non_gold, key=lambda x: x[1]["momentum_6m"], reverse=True)[:3]
-    top3_txt = "  ·  ".join(
-        f"{nom_court(d['name'])} {d['momentum_6m']:+.1f}%" for _, d in top3_mom
-    )
-    msg += esc(f"📈 Top 6 mois : {top3_txt}") + "\n"
-    msg += "\n" + SEP + "\n\n"
-
-    # ── SIGNAUX FORTS (conviction ≥ 6 et RSI < 70) ───────────────────────────
+    validation   = valider_predictions(data_actifs, historique)
     sorted_items = sorted(data_actifs.items(),
                           key=lambda x: conviction_score(x[1]), reverse=True)
-    forts = [(s, d) for s, d in sorted_items
-             if conviction_score(d) >= 6 and d["rsi"] < 70]
 
+    n_actifs = len(data_actifs)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # MESSAGE 1 : INTELLIGENCE ACTIONNABLE
+    # ══════════════════════════════════════════════════════════════════════════
+    m1  = "📊 " + bold(f"ORACLE CAC 40 — {now}") + "\n"
+    m1 += esc(f"({n_actifs} valeurs analysées — CAC 40 + ETF PEA)") + "\n"
+    m1 += SEP + "\n"
+    m1 += esc(f"🌡️ {meteo}  {meteo_note}") + "\n\n"
+
+    # Résumé exécutif
+    m1 += bold("CE QU'IL FAUT RETENIR") + "\n"
+    for line in generer_resume_executif(data_actifs):
+        m1 += esc(f"  {line}") + "\n"
+    m1 += "\n"
+
+    # Top 3 momentum
+    top3 = sorted(data_actifs.items(), key=lambda x: x[1]["momentum_6m"], reverse=True)[:3]
+    top3_txt = "  ·  ".join(f"{d['name']} {d['momentum_6m']:+.1f}%" for _,d in top3)
+    m1 += esc(f"📈 Top élan 6 mois : {top3_txt}") + "\n"
+    m1 += "\n" + SEP + "\n\n"
+
+    # Signaux forts (top 5, RSI < 70)
+    forts = [(s,d) for s,d in sorted_items if conviction_score(d) >= 6 and d["rsi"] < 70][:5]
     if forts:
-        msg += bold("🎯 SIGNAUX FORTS — À SUIVRE DE PRÈS") + "\n"
-        msg += esc("   Niveaux indicatifs basés sur la volatilité (ATR) de chaque actif.") + "\n\n"
+        m1 += bold("🎯 SIGNAUX FORTS") + "\n"
+        m1 += esc("   Niveaux ATR — signaux techniques, pas un conseil financier.") + "\n\n"
         for symbol, data in forts:
-            conv = conviction_score(data)
+            conv     = conviction_score(data)
             rsi_flag = " ⭐" if data["rsi"] <= 35 else ""
-            msg += esc(f"• {data['name']}{rsi_flag}") + "  " + bold(f"{conv}/10") + "\n"
-            msg += esc(f"  {interpreter_signal(data)}") + "\n"
-            msg += esc(f"  {verdict_action(data, conv)}") + "\n\n"
+            m1 += esc(f"• {data['name']}{rsi_flag}") + "  " + bold(f"{conv}/10") + "\n"
+            m1 += esc(f"  {interpreter_signal(data)}") + "\n"
+            m1 += esc(f"  {verdict_action(data, conv)}") + "\n\n"
 
-    # ── ALERTES SURACHAT (RSI ≥ 70) ──────────────────────────────────────────
-    surachat = [(s, d) for s, d in sorted_items if d["rsi"] >= 70]
+    # Alertes surachat (top 3)
+    surachat = [(s,d) for s,d in sorted_items if d["rsi"] >= 70][:3]
     if surachat:
-        msg += bold("⚠️ ALERTES SURACHAT") + "\n\n"
+        m1 += bold("⚠️ ALERTES SURACHAT") + "\n\n"
         for symbol, data in surachat:
             conv = conviction_score(data)
-            msg += esc(f"• {data['name']}  RSI {data['rsi']:.0f}  {data['change']:+.1f}% aujourd'hui") + "\n"
-            msg += esc(f"  {interpreter_signal(data)}") + "\n"
-            msg += esc(f"  {verdict_action(data, conv)}") + "\n\n"
+            m1 += esc(f"• {data['name']}  RSI {data['rsi']:.0f}  {data['change']:+.1f}% aujourd'hui") + "\n"
+            m1 += esc(f"  {interpreter_signal(data)}") + "\n"
+            m1 += esc(f"  {verdict_action(data, conv)}") + "\n\n"
 
-    msg += SEP + "\n\n"
+    m1 += SEP + "\n"
 
-    # ── TABLEAU DE BORD COMPLET ───────────────────────────────────────────────
-    msg += bold("📊 TABLEAU DE BORD") + "\n"
-    msg += esc("  Classés par conviction · ⭐ zone d'achat · ⚠️ surachat") + "\n\n"
-
-    for symbol, data in sorted_items:
-        conv    = conviction_score(data)
-        s_e     = score_emoji(conv)
-        flag_r  = " ⭐" if data["rsi"] <= 35 else (" ⚠️" if data["rsi"] >= 70 else "")
-        prob_s  = f"IA {data['prob_up']:.0f}%" if data.get("ml_ok") else ""
-        line    = (f"  {s_e} {data['name']}{flag_r}"
-                   f"  —  {conv}/10"
-                   f"  —  {data['change']:+.1f}% aujourd'hui"
-                   f"  —  {prob_s}")
-        msg += esc(line) + "\n"
-
-    msg += "\n" + SEP + "\n"
-
-    # ── VALIDATION IA (compacte, quand disponible) ────────────────────────────
-    if validation:
-        acc = validation["accuracy"]
-        acc_e = "🟢" if acc >= 60 else ("🔴" if acc < 45 else "⚪")
-        msg += "\n🔬 " + bold(f"VALIDATION IA — prédictions du {validation['ref_date']}") + "\n"
-        msg += esc(f"  Résultat : {validation['correct']}/{validation['total']} "
-                   f"directions correctes — {acc:.0f}% {acc_e}") + "\n"
-
-        # Meilleure prédiction et moins bonne (les plus instructives)
-        sorted_d = sorted(validation["details"], key=lambda x: abs(x["variation"]), reverse=True)
-        best  = next((d for d in sorted_d if d["ok"]),  None)
-        worst = next((d for d in sorted_d if not d["ok"]), None)
-        if best:
-            dir_p = "hausse" if best["prob_up"] > 50 else "baisse"
-            dir_r = "↗️" if best["variation"] >= 0 else "↘️"
-            msg += esc(f"  ✅ {nom_court(best['name'])} : prédit {dir_p} ({best['prob_up']:.0f}%) "
-                       f"→ réel {dir_r} {best['variation']:+.1f}%") + "\n"
-        if worst:
-            dir_p = "hausse" if worst["prob_up"] > 50 else "baisse"
-            dir_r = "↗️" if worst["variation"] >= 0 else "↘️"
-            msg += esc(f"  ❌ {nom_court(worst['name'])} : prédit {dir_p} ({worst['prob_up']:.0f}%) "
-                       f"→ réel {dir_r} {worst['variation']:+.1f}%") + "\n"
-        msg += "\n" + SEP + "\n"
-
-    # ── PORTEFEUILLE PERSONNEL ────────────────────────────────────────────────
-    msg += "\n💼 " + bold("MON PORTEFEUILLE") + "\n"
+    # Portefeuille
+    m1 += "\n💼 " + bold("MON PORTEFEUILLE") + "\n"
     total_investi = total_actuel = 0
-
     for symbol, pos in portefeuille.items():
         if symbol in data_actifs:
             actuel_price = data_actifs[symbol]["price"]
@@ -550,34 +532,62 @@ def generer_rapport():
             total_investi += val_investie
             total_actuel  += val_actuelle
             perf_s = "🟢" if pnl_euro >= 0 else "🔴"
+            m1 += esc(f"  {perf_s} {pos['nom']} ({pos['quantite']} part)") + "\n"
+            m1 += esc(f"     Valeur : {val_actuelle:.0f} € · achat {val_investie:.0f} €") + "\n"
+            m1 += esc(f"     P&L : {pnl_euro:+.2f} € ({pnl_pct:+.1f}%)  · Aujourd'hui : {data_actifs[symbol]['change']:+.1f}%") + "\n"
+            m1 += esc(f"     Signal : {conv}/10 {score_label(conv)} — {interpreter_signal(data_actifs[symbol])}") + "\n\n"
 
-            msg += esc(f"  {perf_s} {pos['nom']} ({pos['quantite']} part)") + "\n"
-            msg += esc(f"     Valeur actuelle : {val_actuelle:.0f} € "
-                       f"(achat : {val_investie:.0f} €)") + "\n"
-            msg += esc(f"     P&L : {pnl_euro:+.2f} € ({pnl_pct:+.1f}%)  "
-                       f"  Aujourd'hui : {data_actifs[symbol]['change']:+.1f}%") + "\n"
-            msg += esc(f"     Signal du jour : {conv}/10 {score_label(conv)} — "
-                       f"{interpreter_signal(data_actifs[symbol])}") + "\n\n"
+    g_pnl  = total_actuel - total_investi
+    g_pct  = (g_pnl / total_investi * 100) if total_investi > 0 else 0
+    g_symb = "🟢" if g_pnl >= 0 else "🔴"
+    m1 += esc(f"  {g_symb} TOTAL : {total_actuel:.0f} € · investi {total_investi:.0f} € · P&L : {g_pnl:+.2f} € ({g_pct:+.1f}%)") + "\n"
 
-    g_pnl   = total_actuel - total_investi
-    g_pct   = (g_pnl / total_investi * 100) if total_investi > 0 else 0
-    g_symb  = "🟢" if g_pnl >= 0 else "🔴"
-    msg += esc(f"  {g_symb} TOTAL : {total_actuel:.0f} € "
-               f"(investi {total_investi:.0f} €)  P&L : {g_pnl:+.2f} € ({g_pct:+.1f}%)") + "\n"
+    # ══════════════════════════════════════════════════════════════════════════
+    # MESSAGE 2 : TABLEAU DE BORD COMPLET
+    # ══════════════════════════════════════════════════════════════════════════
+    m2  = "📊 " + bold("TABLEAU DE BORD COMPLET") + "\n"
+    m2 += esc(f"  {n_actifs} valeurs · triées par conviction · ⭐ achat · ⚠️ surachat") + "\n"
+    m2 += SEP + "\n\n"
 
-    # ── PIED DE PAGE ──────────────────────────────────────────────────────────
-    msg += "\n" + SEP + "\n"
-    msg += "🤖 `RSI · MACD · SMA200 · OBV · IA Random Forest 7 features · Conviction /10`\n"
-    msg += esc("⚠️ Niveaux indicatifs (ATR) — signaux techniques, pas un conseil financier.")
+    for symbol, data in sorted_items:
+        conv   = conviction_score(data)
+        s_e    = score_emoji(conv)
+        flag_r = " ⭐" if data["rsi"] <= 35 else (" ⚠️" if data["rsi"] >= 70 else "  ")
+        ia_s   = f"IA {data['prob_up']:.0f}%" if data.get("ml_ok") else "IA —"
+        line   = (f"  {s_e} {data['name']:<18}{flag_r}"
+                  f"  {conv}/10"
+                  f"  RSI {data['rsi']:.0f}"
+                  f"  {data['change']:+.1f}%"
+                  f"  {ia_s}")
+        m2 += esc(line) + "\n"
 
-    # ── ENVOI TELEGRAM ────────────────────────────────────────────────────────
-    url     = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": msg, "parse_mode": "MarkdownV2"}
-    response = requests.post(url, json=payload)
-    if not response.ok:
-        print(f"Échec envoi Telegram ({response.status_code}) : {response.text}")
-    else:
-        print("✅ Rapport envoyé avec succès !")
+    m2 += "\n" + SEP + "\n"
+
+    # Validation IA (si disponible)
+    if validation:
+        acc   = validation["accuracy"]
+        acc_e = "🟢" if acc >= 60 else ("🔴" if acc < 45 else "⚪")
+        m2 += "\n🔬 " + bold(f"VALIDATION IA — prédictions du {validation['ref_date']}") + "\n"
+        m2 += esc(f"  {validation['correct']}/{validation['total']} directions correctes — {acc:.0f}% {acc_e}") + "\n"
+        sorted_d = sorted(validation["details"], key=lambda x: abs(x["variation"]), reverse=True)
+        best  = next((d for d in sorted_d if d["ok"]),  None)
+        worst = next((d for d in sorted_d if not d["ok"]), None)
+        if best:
+            dir_p = "hausse" if best["prob_up"] > 50 else "baisse"
+            dir_r = "↗️" if best["variation"] >= 0 else "↘️"
+            m2 += esc(f"  ✅ {best['name']} : {dir_p} ({best['prob_up']:.0f}%) → {dir_r} {best['variation']:+.1f}%") + "\n"
+        if worst:
+            dir_p = "hausse" if worst["prob_up"] > 50 else "baisse"
+            dir_r = "↗️" if worst["variation"] >= 0 else "↘️"
+            m2 += esc(f"  ❌ {worst['name']} : {dir_p} ({worst['prob_up']:.0f}%) → {dir_r} {worst['variation']:+.1f}%") + "\n"
+        m2 += "\n" + SEP + "\n"
+
+    m2 += "\n🤖 `RSI · MACD · SMA200 · OBV · IA Random Forest 7 features · Conviction /10`\n"
+    m2 += esc("⚠️ Niveaux ATR indicatifs — pas un conseil financier.")
+
+    # ── Envoi des deux messages ───────────────────────────────────────────────
+    envoyer_telegram(m1, CHAT_ID, TELEGRAM_TOKEN)
+    envoyer_telegram(m2, CHAT_ID, TELEGRAM_TOKEN)
 
     sauvegarder_historique(historique, data_actifs)
 
