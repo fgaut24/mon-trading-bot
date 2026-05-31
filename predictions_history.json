@@ -2,45 +2,189 @@
   {
     "date": "2026-05-31",
     "assets": {
-      "TTE.PA": {
-        "price": 75.18,
-        "prob_up": 83.3
-      },
       "MC.PA": {
         "price": 473.05,
         "prob_up": 47.7
       },
-      "AI.PA": {
-        "price": 178.08,
-        "prob_up": 35.0
+      "RMS.PA": {
+        "price": 1620.0,
+        "prob_up": 72.4
       },
       "OR.PA": {
         "price": 382.55,
         "prob_up": 36.1
       },
+      "KER.PA": {
+        "price": 255.35,
+        "prob_up": 38.0
+      },
+      "EL.PA": {
+        "price": 175.15,
+        "prob_up": 39.3
+      },
+      "TTE.PA": {
+        "price": 75.18,
+        "prob_up": 83.3
+      },
+      "ENGI.PA": {
+        "price": 26.47,
+        "prob_up": 34.9
+      },
+      "AIR.PA": {
+        "price": 179.7,
+        "prob_up": 21.6
+      },
+      "SAF.PA": {
+        "price": 305.7,
+        "prob_up": 59.6
+      },
+      "HO.PA": {
+        "price": 239.5,
+        "prob_up": 67.9
+      },
+      "DG.PA": {
+        "price": 125.05,
+        "prob_up": 60.1
+      },
+      "LR.PA": {
+        "price": 147.65,
+        "prob_up": 58.5
+      },
       "SU.PA": {
         "price": 269.95,
         "prob_up": 52.3
+      },
+      "SGO.PA": {
+        "price": 78.26,
+        "prob_up": 56.8
+      },
+      "ALO.PA": {
+        "price": 17.14,
+        "prob_up": 51.4
+      },
+      "FGR.PA": {
+        "price": 124.75,
+        "prob_up": 65.0
+      },
+      "RNO.PA": {
+        "price": 29.59,
+        "prob_up": 5.9
+      },
+      "STLAM.MI": {
+        "price": 6.865,
+        "prob_up": 42.6
+      },
+      "MT.AS": {
+        "price": 59.32,
+        "prob_up": 89.5
+      },
+      "ML.PA": {
+        "price": 31.51,
+        "prob_up": 46.0
+      },
+      "BNP.PA": {
+        "price": 92.95,
+        "prob_up": 34.7
+      },
+      "ACA.PA": {
+        "price": 16.6,
+        "prob_up": 82.5
+      },
+      "GLE.PA": {
+        "price": 71.63,
+        "prob_up": 75.5
+      },
+      "CS.PA": {
+        "price": 39.73,
+        "prob_up": 39.7
+      },
+      "SAN.PA": {
+        "price": 75.29,
+        "prob_up": 10.7
+      },
+      "AI.PA": {
+        "price": 178.08,
+        "prob_up": 35.0
+      },
+      "BIM.PA": {
+        "price": 74.35,
+        "prob_up": 14.7
+      },
+      "VIE.PA": {
+        "price": 34.73,
+        "prob_up": 48.7
+      },
+      "ORA.PA": {
+        "price": 17.935,
+        "prob_up": 51.0
+      },
+      "EN.PA": {
+        "price": 50.46,
+        "prob_up": 71.0
+      },
+      "URW.PA": {
+        "price": 99.34,
+        "prob_up": 68.7
+      },
+      "CAP.PA": {
+        "price": 101.95,
+        "prob_up": 69.5
+      },
+      "DSY.PA": {
+        "price": 18.805,
+        "prob_up": 37.8
+      },
+      "PUB.PA": {
+        "price": 83.74,
+        "prob_up": 30.0
+      },
+      "WLN.PA": {
+        "price": 0.3588,
+        "prob_up": 41.3
+      },
+      "BN.PA": {
+        "price": 60.94,
+        "prob_up": 46.2
+      },
+      "CA.PA": {
+        "price": 16.035,
+        "prob_up": 43.9
+      },
+      "RI.PA": {
+        "price": 63.42,
+        "prob_up": 57.7
+      },
+      "VIV.PA": {
+        "price": 2.35,
+        "prob_up": 19.1
       },
       "WPEA.PA": {
         "price": 6.768,
         "prob_up": 73.4
       },
-      "AAPL": {
-        "price": 312.06,
-        "prob_up": 31.4
+      "CW8.PA": {
+        "price": 671.9982,
+        "prob_up": 58.5
       },
-      "MSFT": {
-        "price": 450.24,
-        "prob_up": 32.2
+      "PANX.PA": {
+        "price": 79.821,
+        "prob_up": 50.0
       },
-      "NVDA": {
-        "price": 211.14,
+      "PSP5.PA": {
+        "price": 56.974,
+        "prob_up": 33.4
+      },
+      "PAEEM.PA": {
+        "price": 36.131,
+        "prob_up": 25.1
+      },
+      "MEUD.PA": {
+        "price": 307.15,
+        "prob_up": 68.7
+      },
+      "CACC.PA": {
+        "price": 41.41,
         "prob_up": 41.6
-      },
-      "GC=F": {
-        "price": 4593.0,
-        "prob_up": 80.3
       }
     }
   }
