@@ -1,0 +1,47 @@
+[
+  {
+    "date": "2026-05-31",
+    "assets": {
+      "TTE.PA": {
+        "price": 75.18,
+        "prob_up": 83.3
+      },
+      "MC.PA": {
+        "price": 473.05,
+        "prob_up": 47.7
+      },
+      "AI.PA": {
+        "price": 178.08,
+        "prob_up": 35.0
+      },
+      "OR.PA": {
+        "price": 382.55,
+        "prob_up": 36.1
+      },
+      "SU.PA": {
+        "price": 269.95,
+        "prob_up": 52.3
+      },
+      "WPEA.PA": {
+        "price": 6.768,
+        "prob_up": 73.4
+      },
+      "AAPL": {
+        "price": 312.06,
+        "prob_up": 31.4
+      },
+      "MSFT": {
+        "price": 450.24,
+        "prob_up": 32.2
+      },
+      "NVDA": {
+        "price": 211.14,
+        "prob_up": 41.6
+      },
+      "GC=F": {
+        "price": 4593.0,
+        "prob_up": 80.3
+      }
+    }
+  }
+]
