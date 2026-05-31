@@ -121,23 +121,79 @@ def interpreter_signal(data):
         parts.append("volumes en hausse")
     return " · ".join(parts)
 
-def conseil_action(data, conv):
-    """Recommandation courte en une ligne."""
-    rsi = data["rsi"]
-    if rsi <= 35 and conv >= 6:
-        return "→ Signal d'achat technique. À surveiller pour entrée."
-    elif rsi <= 35:
-        return "→ Survente technique, mais signaux mixtes. Attendre confirmation."
-    elif rsi >= 70 and conv <= 3:
-        return "→ Tous les signaux convergent vers un allègement."
-    elif rsi >= 70:
-        return "→ Surachat technique. Ne pas renforcer."
-    elif conv >= 7:
-        return "→ Profil favorable. À renforcer sur un repli."
-    elif conv >= 5:
-        return "→ À conserver. Pas d'urgence à agir."
-    else:
-        return "→ Signaux faibles. Observer sans agir."
+def verdict_action(data, conv):
+    """
+    Verdict explicite (ACHETER / RENFORCER / CONSERVER / ALLÉGER / VENDRE)
+    avec seuils indicatifs calculés depuis l'ATR de l'actif.
+    ⚠️ Signaux techniques uniquement — pas un conseil financier personnel.
+    """
+    rsi  = data["rsi"]
+    prix = data["price"]
+    atr  = data["atr"]
+
+    # Niveaux ATR propres à chaque actif (volatilité normalisée)
+    entree  = round(prix - 0.5 * atr, 2)   # entrée sur léger repli
+    objectif = round(prix + 2.5 * atr, 2)  # objectif R:R ≈ 1:1.7
+    stop    = round(prix - 1.5 * atr, 2)   # seuil de protection
+
+    # ── Acheter ──────────────────────────────────────────────────────────────
+    if rsi <= 35 and conv >= 7:
+        return (f"🟢 ACHETER — signal fort\n"
+                f"   J'entre à {prix:.2f} € ou sur repli vers {entree:.2f} €\n"
+                f"   Je vise {objectif:.2f} €  ·  Je coupe sous {stop:.2f} €")
+
+    if rsi <= 35 and conv >= 5:
+        return (f"🟢 ACHETER — signal modéré\n"
+                f"   J'entre si le prix tient au-dessus de {stop:.2f} €\n"
+                f"   Je vise {objectif:.2f} €  ·  Je coupe sous {stop:.2f} €")
+
+    if rsi <= 35:
+        return (f"👁️ SURVEILLER — survente mais signaux mixtes\n"
+                f"   J'attends que la tendance se stabilise avant d'entrer.\n"
+                f"   Je reviens si la conviction remonte au-dessus de 5/10.")
+
+    # ── Renforcer ────────────────────────────────────────────────────────────
+    if rsi <= 45 and conv >= 7:
+        return (f"🔵 RENFORCER sur repli\n"
+                f"   J'attends un retour vers {entree:.2f} € pour entrer\n"
+                f"   Je vise {objectif:.2f} €  ·  Je coupe sous {stop:.2f} €")
+
+    if rsi <= 45 and conv >= 5:
+        return (f"💎 CONSERVER — profil intéressant\n"
+                f"   Je renforce si le prix descend vers {entree:.2f} €\n"
+                f"   Je coupe sous {stop:.2f} €")
+
+    # ── Vendre / Alléger ─────────────────────────────────────────────────────
+    if rsi >= 70 and conv <= 3:
+        return (f"🔴 VENDRE — convergence baissière\n"
+                f"   Je vends maintenant — tous les signaux s'alignent à la baisse.\n"
+                f"   Je reviens si le RSI repasse sous 50.")
+
+    if rsi >= 70 and conv <= 5:
+        return (f"🟠 ALLÉGER — surachat confirmé\n"
+                f"   Je réduis 30 à 50 % de ma position.\n"
+                f"   Si RSI < 65 demain je conserve le reste, sinon je réduis encore.")
+
+    if rsi >= 70:
+        return (f"🟡 ATTENTION — surachat mais tendance forte\n"
+                f"   Je ne renforce pas. Je protège mes gains avec un stop à {stop:.2f} €")
+
+    # ── Tendu mais pas encore en vente ───────────────────────────────────────
+    if rsi >= 65:
+        return (f"🟡 ATTENDRE — zone tendue\n"
+                f"   Je n'achète pas maintenant. Je reviens si RSI repasse sous 60.")
+
+    # ── Conserver ────────────────────────────────────────────────────────────
+    if conv >= 6:
+        return (f"💎 CONSERVER — profil favorable\n"
+                f"   Je renforce uniquement sur repli vers {entree:.2f} €\n"
+                f"   Je coupe sous {stop:.2f} €")
+
+    if conv >= 4:
+        return "💎 CONSERVER — je ne change rien pour l'instant"
+
+    return (f"🟡 PRUDENCE — signaux faibles\n"
+            f"   J'envisage d'alléger si ma position est importante.")
 
 def generer_resume_executif(data_actifs):
     """3 à 4 points clés du jour en français, pour lecture rapide."""
@@ -344,6 +400,8 @@ def fetch_indicators_and_predict(ticker_symbol):
             "macd_trend":  "🍏" if last_row['MACD'] > last_row['Signal'] else "🔻",
             "bb_pos":      ("BB BAS" if current_price <= last_row['BB_Low'] else
                             "BB HIGH" if current_price >= last_row['BB_High'] else "BB MID"),
+            "bb_low":      last_row['BB_Low'],
+            "bb_high":     last_row['BB_High'],
             "sma_trend":   "↗️" if current_price > last_row['SMA200'] else "↘️",
             "atr":         last_row['ATR'],
             "momentum_6m": last_row['Var_6M'],
@@ -415,13 +473,14 @@ def generer_rapport():
              if conviction_score(d) >= 6 and d["rsi"] < 70]
 
     if forts:
-        msg += bold("🎯 SIGNAUX FORTS — À SUIVRE DE PRÈS") + "\n\n"
+        msg += bold("🎯 SIGNAUX FORTS — À SUIVRE DE PRÈS") + "\n"
+        msg += esc("   Niveaux indicatifs basés sur la volatilité (ATR) de chaque actif.") + "\n\n"
         for symbol, data in forts:
             conv = conviction_score(data)
             rsi_flag = " ⭐" if data["rsi"] <= 35 else ""
             msg += esc(f"• {data['name']}{rsi_flag}") + "  " + bold(f"{conv}/10") + "\n"
             msg += esc(f"  {interpreter_signal(data)}") + "\n"
-            msg += esc(f"  {conseil_action(data, conv)}") + "\n\n"
+            msg += esc(f"  {verdict_action(data, conv)}") + "\n\n"
 
     # ── ALERTES SURACHAT (RSI ≥ 70) ──────────────────────────────────────────
     surachat = [(s, d) for s, d in sorted_items if d["rsi"] >= 70]
@@ -431,7 +490,7 @@ def generer_rapport():
             conv = conviction_score(data)
             msg += esc(f"• {data['name']}  RSI {data['rsi']:.0f}  {data['change']:+.1f}% aujourd'hui") + "\n"
             msg += esc(f"  {interpreter_signal(data)}") + "\n"
-            msg += esc(f"  {conseil_action(data, conv)}") + "\n\n"
+            msg += esc(f"  {verdict_action(data, conv)}") + "\n\n"
 
     msg += SEP + "\n\n"
 
@@ -508,7 +567,8 @@ def generer_rapport():
 
     # ── PIED DE PAGE ──────────────────────────────────────────────────────────
     msg += "\n" + SEP + "\n"
-    msg += "🤖 `RSI · MACD · SMA200 · OBV · IA Random Forest 7 features · Conviction /10`"
+    msg += "🤖 `RSI · MACD · SMA200 · OBV · IA Random Forest 7 features · Conviction /10`\n"
+    msg += esc("⚠️ Niveaux indicatifs (ATR) — signaux techniques, pas un conseil financier.")
 
     # ── ENVOI TELEGRAM ────────────────────────────────────────────────────────
     url     = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
