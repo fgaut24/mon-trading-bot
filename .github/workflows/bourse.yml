@@ -1,29 +1,46 @@
-name: Rapport Bourse Quotidien
+name: Bot Bourse Telegram
+
+# Permissions nécessaires pour que le bot puisse committer l'historique
+permissions:
+  contents: write
 
 on:
   schedule:
-    # 07:00 UTC correspond à 09:00 heure de Paris (heure d'été) du lundi au vendredi
-    - cron: '11 7 * * 1-5'
-  workflow_dispatch: # Ce bouton magique permet de lancer un test manuellement !
+    # GitHub Actions utilise l'heure UTC.
+    # 17:00 UTC = 18:00 en hiver (CET) / 19:00 en été (CEST).
+    # Tous les jours ouvrés (lundi → vendredi) à 17:00 UTC.
+    - cron: "0 17 * * 1-5"
+  workflow_dispatch:
 
 jobs:
-  build:
+  rapport:
     runs-on: ubuntu-latest
     steps:
-      - name: 💾 Recuperation du code
+      - name: Récupérer le code
         uses: actions/checkout@v4
 
-      - name: 🐍 Installation de Python
+      - name: Installer Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
+          cache: "pip"
 
-      - name: ⚙️ Installation des outils boursiers
-        run: |
-          pip install yfinance pandas requests numpy matplotlib scikit-learn
+      - name: Installer les dépendances
+        run: pip install -r requirements.txt
 
-      - name: 🚀 Lancement du Screener
+      - name: Lancer le screener
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python screener_pro.py
+
+      # Le script a créé / mis à jour predictions_history.json.
+      # On le committe dans le dépôt pour que la prochaine exécution
+      # puisse valider les prédictions d'aujourd'hui.
+      - name: Sauvegarder l'historique des prédictions
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add predictions_history.json
+          git diff --staged --quiet || git commit -m "Historique prédictions $(date +'%Y-%m-%d')"
+          git push
