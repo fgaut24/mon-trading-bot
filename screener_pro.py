@@ -1,10 +1,12 @@
 import os
+import json
 import datetime
 import time
 import numpy as np
 import pandas as pd
 import requests
 import yfinance as yf
+from pathlib import Path
 
 # Importation du Machine Learning (Sera installé via GitHub Actions)
 try:
@@ -19,6 +21,9 @@ except ImportError:
 # ==============================================================================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "VOTRE_TOKEN_DE_SECOURS")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "VOTRE_CHAT_ID_DE_SECOURS")
+
+# Fichier de persistance des prédictions (à la racine du dépôt)
+HISTORY_FILE = Path("predictions_history.json")
 
 TICKERS = {
     "TTE.PA": "TotalEnergies 🇪🇺",
@@ -55,18 +60,8 @@ def bold(text):
 # ==============================================================================
 # SCORE DE CONVICTION COMPOSITE (0 → 10)
 # ==============================================================================
-# Chaque indicateur contribue au score selon son alignement haussier :
-#   RSI       : 0-3 pts  (bas = oversold = opportunité d'achat)
-#   MACD      : 0-2 pts  (tendance haussière confirmée)
-#   SMA200    : 0-2 pts  (prix au-dessus de la tendance longue)
-#   IA RF     : 0-2 pts  (probabilité de hausse à 5 jours)
-#   Volume    : 0-1 pt   (pression d'accumulation OBV)
-# Total max = 10
-
 def conviction_score(data):
     score = 0
-
-    # RSI : signal d'achat d'autant plus fort que le RSI est bas
     rsi = data["rsi"]
     if rsi <= 35:
         score += 3
@@ -74,31 +69,20 @@ def conviction_score(data):
         score += 2
     elif rsi <= 55:
         score += 1
-    # rsi > 55 → 0 pt
-
-    # MACD haussier
     if data["macd_trend"] == "🍏":
         score += 2
-
-    # Prix au-dessus de la SMA 200
     if data["sma_trend"] == "↗️":
         score += 2
-
-    # Prédiction IA (neutre si indisponible)
     if data.get("ml_ok"):
         if data["prob_up"] > 55:
             score += 2
         elif data["prob_up"] >= 45:
             score += 1
     else:
-        score += 1  # ni positif ni négatif si IA absente
-
-    # Volume OBV haussier
+        score += 1
     if data["vol_trend"] == "📈":
         score += 1
-
-    return score  # 0 (signal baissier fort) → 10 (signal haussier fort)
-
+    return score
 
 def score_label(score):
     if score >= 8:
@@ -111,6 +95,115 @@ def score_label(score):
         return "🟡 Faible"
     else:
         return "🔴 Négatif"
+
+# ==============================================================================
+# PERSISTANCE ET VALIDATION DES PRÉDICTIONS IA
+# ==============================================================================
+def charger_historique():
+    """Charge l'historique des prédictions depuis le fichier JSON."""
+    if HISTORY_FILE.exists():
+        try:
+            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            print(f"Avertissement : impossible de lire l'historique ({e})")
+    return []
+
+
+def sauvegarder_historique(historique, data_actifs):
+    """
+    Ajoute les prédictions IA du jour à l'historique et sauvegarde.
+    Seuls les actifs avec ml_ok=True sont enregistrés (prédictions exploitables).
+    Conserve au maximum 90 entrées (environ 4 mois de données quotidiennes).
+    """
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+
+    # Évite le doublon si le bot s'exécute deux fois dans la même journée
+    historique = [e for e in historique if e["date"] != today]
+
+    entry = {
+        "date": today,
+        "assets": {
+            symbol: {
+                "price": round(data["price"], 4),
+                "prob_up": round(data["prob_up"], 1)
+            }
+            for symbol, data in data_actifs.items()
+            if data.get("ml_ok")
+        }
+    }
+
+    historique.append(entry)
+    historique = historique[-90:]  # Fenêtre glissante de 90 entrées max
+
+    try:
+        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(historique, f, ensure_ascii=False, indent=2)
+        print(f"✅ Historique sauvegardé : {len(entry['assets'])} prédictions pour {today}")
+    except IOError as e:
+        print(f"Erreur sauvegarde historique : {e}")
+
+    return historique
+
+
+def valider_predictions(data_actifs, historique):
+    """
+    Recherche l'entrée la plus récente datant d'au moins 5 jours calendaires
+    (≈ 5 séances de bourse) et compare les prédictions avec les prix actuels.
+    Retourne None si l'historique est insuffisant.
+    """
+    today = datetime.datetime.now().date()
+    cutoff = today - datetime.timedelta(days=5)
+
+    # Candidats : entrées d'il y a >= 5 jours ; on prend la plus récente
+    candidats = [
+        e for e in historique
+        if datetime.datetime.strptime(e["date"], "%Y-%m-%d").date() <= cutoff
+    ]
+    if not candidats:
+        return None
+
+    ref = max(candidats, key=lambda e: e["date"])
+    ref_date_obj = datetime.datetime.strptime(ref["date"], "%Y-%m-%d").date()
+    ref_date_str = ref_date_obj.strftime("%d/%m/%Y")
+
+    total, correct = 0, 0
+    details = []
+
+    for symbol, pred in ref["assets"].items():
+        if symbol not in data_actifs:
+            continue
+
+        prix_pred   = pred["price"]
+        prix_actuel = data_actifs[symbol]["price"]
+        prob_up     = pred["prob_up"]
+
+        direction_predite = prob_up > 50          # True = hausse attendue
+        direction_reelle  = prix_actuel > prix_pred  # True = hausse constatée
+        variation = (prix_actuel - prix_pred) / prix_pred * 100
+        ok = (direction_predite == direction_reelle)
+
+        total += 1
+        if ok:
+            correct += 1
+
+        details.append({
+            "name":      data_actifs[symbol]["name"],
+            "prob_up":   prob_up,
+            "variation": variation,
+            "ok":        ok
+        })
+
+    if total == 0:
+        return None
+
+    return {
+        "ref_date": ref_date_str,
+        "total":    total,
+        "correct":  correct,
+        "accuracy": correct / total * 100,
+        "details":  details
+    }
 
 # ==============================================================================
 # FONCTIONS TECHNIQUES, VOLUMES ET MACHINE LEARNING
@@ -150,24 +243,16 @@ def fetch_indicators_and_predict(ticker_symbol):
         df['Var_6M'] = df['Close'].pct_change(periods=126) * 100
 
         # FEATURES ADDITIONNELLES POUR LE MACHINE LEARNING
-        # 4 dimensions orthogonales aux 3 features d'origine (momentum/volatilité court terme)
-
-        # Positionnement dans le range 52 semaines (mean-reversion vs tendance longue)
         df['High_52W'] = df['High'].rolling(window=252).max()
-        df['Low_52W'] = df['Low'].rolling(window=252).min()
+        df['Low_52W']  = df['Low'].rolling(window=252).min()
         range_52w = (df['High_52W'] - df['Low_52W']).clip(lower=1e-9)
         df['Price_52W_Pct'] = (df['Close'] - df['Low_52W']) / range_52w * 100
-        # 0 % = au plus bas de l'année, 100 % = au plus haut de l'année
 
-        # Force de la tendance moyen-terme : SMA50 vs SMA200 (golden/death cross en %)
         df['SMA50'] = df['Close'].rolling(window=50).mean()
         df['SMA50_vs_SMA200'] = (df['SMA50'] - df['SMA200']) / df['SMA200'] * 100
 
-        # Largeur des bandes de Bollinger : régime de volatilité (compression = breakout imminent)
         df['BB_Width'] = (df['BB_High'] - df['BB_Low']) / df['MA20'] * 100
-
-        # Momentum 1 mois (20 séances) — horizon différent du RSI (14j) et de Var_6M (126j)
-        df['Var_1M'] = df['Close'].pct_change(periods=20) * 100
+        df['Var_1M']   = df['Close'].pct_change(periods=20) * 100
 
         # 2. ANALYSE DES VOLUMES (OBV)
         if 'Volume' in df.columns and df['Volume'].sum() > 0:
@@ -204,7 +289,7 @@ def fetch_indicators_and_predict(ticker_symbol):
                         backtest_score = accuracy_score(y_test, y_pred) * 100
 
                     current_features = df[features].iloc[-1:].fillna(0)
-                    proba = model.predict_proba(current_features)[0]
+                    proba  = model.predict_proba(current_features)[0]
                     classes = list(model.classes_)
                     if 1 in classes:
                         prob_up = proba[classes.index(1)] * 100
@@ -227,20 +312,21 @@ def fetch_indicators_and_predict(ticker_symbol):
             div_str = "—"
 
         return {
-            "price": current_price,
-            "change": ((current_price - prev_row['Close']) / prev_row['Close']) * 100,
-            "rsi": last_row['RSI'],
-            "macd_trend": "🍏" if last_row['MACD'] > last_row['Signal'] else "🔻",
-            "bb_pos": "BB BAS" if current_price <= last_row['BB_Low'] else ("BB HIGH" if current_price >= last_row['BB_High'] else "BB MID"),
-            "sma_trend": "↗️" if current_price > last_row['SMA200'] else "↘️",
-            "atr": last_row['ATR'],
+            "price":       current_price,
+            "change":      ((current_price - prev_row['Close']) / prev_row['Close']) * 100,
+            "rsi":         last_row['RSI'],
+            "macd_trend":  "🍏" if last_row['MACD'] > last_row['Signal'] else "🔻",
+            "bb_pos":      "BB BAS" if current_price <= last_row['BB_Low'] else (
+                           "BB HIGH" if current_price >= last_row['BB_High'] else "BB MID"),
+            "sma_trend":   "↗️" if current_price > last_row['SMA200'] else "↘️",
+            "atr":         last_row['ATR'],
             "momentum_6m": last_row['Var_6M'],
-            "per": per_raw,
-            "dividend": div_str,
-            "vol_trend": vol_trend,
-            "prob_up": prob_up,
-            "backtest": backtest_score,
-            "ml_ok": ml_ok
+            "per":         per_raw,
+            "dividend":    div_str,
+            "vol_trend":   vol_trend,
+            "prob_up":     prob_up,
+            "backtest":    backtest_score,
+            "ml_ok":       ml_ok
         }
     except Exception as e:
         print(f"Erreur sur {ticker_symbol}: {e}")
@@ -252,6 +338,9 @@ def fetch_indicators_and_predict(ticker_symbol):
 def generer_rapport():
     SEP = "════════════════════════════════"
 
+    # ── Chargement de l'historique des prédictions ──────────────────────────
+    historique = charger_historique()
+
     try:
         vix = yf.Ticker("^VIX").history(period="1d")['Close'].iloc[-1]
         meteo = f"🟢 CALME ({vix:.1f})" if vix < 20 else f"🔴 NERVEUX ({vix:.1f})"
@@ -260,12 +349,12 @@ def generer_rapport():
 
     now = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
 
-    msg = "📊 " + bold("BILAN STRATÉGIQUE 11.1 (L'Oracle)") + "\n"
+    msg = "📊 " + bold("BILAN STRATÉGIQUE 11.2 (L'Oracle)") + "\n"
     msg += esc(f"🗓️ {now}") + "\n"
     msg += SEP + "\n\n"
     msg += esc(f"🌡️ MÉTÉO MARCHÉ : {meteo}") + "\n\n"
     msg += esc("📖 Score conviction : RSI(3) MACD(2) SMA200(2) IA(2) Vol(1) = /10 — "
-               "IA Random Forest : 7 features (RSI · MACD · ATR · 52W · SMA50/200 · BBWidth · Momentum1M).") + "\n\n"
+               "IA Random Forest : 7 features.") + "\n\n"
 
     data_actifs = {}
     momentum_list = []
@@ -278,13 +367,15 @@ def generer_rapport():
             if symbol != "GC=F":
                 momentum_list.append((name, res["momentum_6m"], res["per"], res["dividend"]))
 
-    # 1. TOP MOMENTUM 6 MOIS (flèche et signe dynamiques)
+    # ── Validation des prédictions passées ──────────────────────────────────
+    validation = valider_predictions(data_actifs, historique)
+
+    # 1. TOP MOMENTUM 6 MOIS
     momentum_list.sort(key=lambda x: x[1], reverse=True)
     msg += "📈 " + bold("TOP MOMENTUM 6 MOIS") + "\n"
     for i, (name, val, per, div) in enumerate(momentum_list[:3], 1):
         arrow = "↗️" if val >= 0 else "↘️"
-        line = f"  {i}. {name}  {val:+.1f}%  {arrow}"
-        msg += esc(line) + "\n"
+        msg += esc(f"  {i}. {name}  {val:+.1f}%  {arrow}") + "\n"
     msg += "\n"
 
     # 2. CLASSIFICATION DES STRATÉGIES
@@ -298,52 +389,58 @@ def generer_rapport():
 
         if data.get("ml_ok"):
             ia_color = "🟢" if data['prob_up'] > 55 else ("🔴" if data['prob_up'] < 45 else "⚪")
-            ia_line = f"    🧠 IA : {data['prob_up']:.0f}% Hausse {ia_color} (Fiabilité backtest : {data['backtest']:.0f}%) | Vol: {data['vol_trend']}\n"
+            ia_line = (f"    🧠 IA : {data['prob_up']:.0f}% Hausse {ia_color} "
+                       f"(Fiabilité backtest : {data['backtest']:.0f}%) | Vol: {data['vol_trend']}\n")
         else:
             ia_line = f"    🧠 IA : indisponible | Vol: {data['vol_trend']}\n"
 
         if data["rsi"] <= 35:
             entry = (f"  • {data['name']}  ⭐⭐\n"
                      f"    RSI {data['rsi']:.0f} | MACD ➖ | {data['bb_pos']} | Achat ✅\n"
-                     f"{ia_line}"
-                     f"{conv_line}")
+                     f"{ia_line}{conv_line}")
             acheter.append(esc(entry))
         elif data["rsi"] >= 70:
             entry = (f"  • {data['name']}  RSI {data['rsi']:.0f}  {data['change']:+.1f}% aujourd'hui\n"
-                     f"{ia_line}"
-                     f"{conv_line}")
+                     f"{ia_line}{conv_line}")
             vendre.append(esc(entry))
         else:
             entry = (f"  • {data['name']}  RSI {data['rsi']:.0f}  {data['sma_trend']}\n"
-                     f"{ia_line}"
-                     f"{conv_line}")
+                     f"{ia_line}{conv_line}")
             conserver.append(esc(entry))
 
     msg += "💰 " + bold("ACHETER / RENFORCER") + "\n"
-    if acheter:
-        msg += "".join(acheter)
-    else:
-        msg += esc("  Aucune opportunité validée") + "\n"
+    msg += "".join(acheter) if acheter else esc("  Aucune opportunité validée") + "\n"
     msg += "\n"
 
     msg += "💎 " + bold("CONSERVER") + "\n"
-    if conserver:
-        msg += "".join(conserver)
-    else:
-        msg += esc("  Aucun actif") + "\n"
+    msg += "".join(conserver) if conserver else esc("  Aucun actif") + "\n"
     msg += "\n"
 
     msg += "⚠️ " + bold("VENDRE / ALLÉGER") + "\n"
-    if vendre:
-        msg += "".join(vendre)
-    else:
-        msg += esc("  Aucune alerte") + "\n"
+    msg += "".join(vendre) if vendre else esc("  Aucune alerte") + "\n"
     msg += "\n" + SEP + "\n"
 
-    # 3. SECTION PORTEFEUILLE PERSONNEL
+    # 3. VALIDATION IA (section conditionnelle — absente les 5 premiers jours)
+    if validation:
+        acc = validation["accuracy"]
+        acc_color = "🟢" if acc >= 60 else ("🔴" if acc < 45 else "⚪")
+        msg += "🔬 " + bold(f"VALIDATION IA — prédictions du {validation['ref_date']}") + "\n"
+        msg += esc(f"  Résultat : {validation['correct']}/{validation['total']} "
+                   f"directions correctes  {acc_color} {acc:.0f}%") + "\n"
+        for d in validation["details"]:
+            tick = "✅" if d["ok"] else "❌"
+            dir_pred = "Hausse" if d["prob_up"] > 50 else "Baisse"
+            dir_reel = "↗️" if d["variation"] >= 0 else "↘️"
+            line = (f"  {tick} {d['name']}  "
+                    f"prédit {dir_pred} ({d['prob_up']:.0f}%)  "
+                    f"réel {dir_reel} {d['variation']:+.1f}%")
+            msg += esc(line) + "\n"
+        msg += "\n" + SEP + "\n"
+
+    # 4. PORTEFEUILLE PERSONNEL
     msg += "💼 " + bold("PORTEFEUILLE PERSONNEL") + "\n"
     total_investi = 0
-    total_actuel = 0
+    total_actuel  = 0
 
     for symbol, pos in portefeuille.items():
         if symbol in data_actifs:
@@ -351,14 +448,13 @@ def generer_rapport():
             val_investie = pos["prix_achat"] * pos["quantite"]
             val_actuelle = actuel_price * pos["quantite"]
             pnl_euro = val_actuelle - val_investie
-            pnl_pct = (pnl_euro / val_investie) * 100
-            conv = conviction_score(data_actifs[symbol])
+            pnl_pct  = (pnl_euro / val_investie) * 100
+            conv     = conviction_score(data_actifs[symbol])
 
             total_investi += val_investie
-            total_actuel += val_actuelle
+            total_actuel  += val_actuelle
 
             perf_symb = "🟢" if pnl_euro >= 0 else "🔴"
-
             block = (f"  {perf_symb} {pos['nom']}\n"
                      f"     {pos['quantite']} parts × {actuel_price:.2f}  =  {val_actuelle:.0f} €\n"
                      f"     Aujourd'hui : {data_actifs[symbol]['change']:+.1f}%\n"
@@ -367,7 +463,7 @@ def generer_rapport():
             msg += esc(block)
 
     global_pnl_euro = total_actuel - total_investi
-    global_pnl_pct = (global_pnl_euro / total_investi) * 100 if total_investi > 0 else 0
+    global_pnl_pct  = (global_pnl_euro / total_investi) * 100 if total_investi > 0 else 0
     global_symb = "🟢" if global_pnl_euro >= 0 else "🔴"
 
     msg += esc(f"  {global_symb} TOTAL  {total_actuel:.0f} € / investi {total_investi:.0f} €") + "\n"
@@ -376,15 +472,17 @@ def generer_rapport():
     msg += "\n" + SEP + "\n"
     msg += "🤖 `Analyse : RSI14 · MACD · SMA200 · OBV · IA (Random Forest) · Conviction /10`"
 
-    # Envoi Telegram
+    # ── Envoi Telegram ────────────────────────────────────────────────────────
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": msg, "parse_mode": "MarkdownV2"}
     response = requests.post(url, json=payload)
-
     if not response.ok:
         print(f"Échec envoi Telegram ({response.status_code}) : {response.text}")
     else:
         print("✅ Rapport envoyé avec succès !")
+
+    # ── Sauvegarde des prédictions du jour (APRÈS envoi) ─────────────────────
+    sauvegarder_historique(historique, data_actifs)
 
 if __name__ == "__main__":
     generer_rapport()
