@@ -20,7 +20,7 @@ jobs:
 
       - name: ⚙️ Installation des outils boursiers
         run: |
-          pip install yfinance pandas requests numpy matplotlib
+          pip install yfinance pandas requests numpy matplotlib scikit-learn
 
       - name: 🚀 Lancement du Screener
         env:
