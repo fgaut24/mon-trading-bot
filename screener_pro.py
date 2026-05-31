@@ -53,12 +53,72 @@ def bold(text):
     return f"*{esc(text)}*"
 
 # ==============================================================================
+# SCORE DE CONVICTION COMPOSITE (0 → 10)
+# ==============================================================================
+# Chaque indicateur contribue au score selon son alignement haussier :
+#   RSI       : 0-3 pts  (bas = oversold = opportunité d'achat)
+#   MACD      : 0-2 pts  (tendance haussière confirmée)
+#   SMA200    : 0-2 pts  (prix au-dessus de la tendance longue)
+#   IA RF     : 0-2 pts  (probabilité de hausse à 5 jours)
+#   Volume    : 0-1 pt   (pression d'accumulation OBV)
+# Total max = 10
+
+def conviction_score(data):
+    score = 0
+
+    # RSI : signal d'achat d'autant plus fort que le RSI est bas
+    rsi = data["rsi"]
+    if rsi <= 35:
+        score += 3
+    elif rsi <= 45:
+        score += 2
+    elif rsi <= 55:
+        score += 1
+    # rsi > 55 → 0 pt
+
+    # MACD haussier
+    if data["macd_trend"] == "🍏":
+        score += 2
+
+    # Prix au-dessus de la SMA 200
+    if data["sma_trend"] == "↗️":
+        score += 2
+
+    # Prédiction IA (neutre si indisponible)
+    if data.get("ml_ok"):
+        if data["prob_up"] > 55:
+            score += 2
+        elif data["prob_up"] >= 45:
+            score += 1
+    else:
+        score += 1  # ni positif ni négatif si IA absente
+
+    # Volume OBV haussier
+    if data["vol_trend"] == "📈":
+        score += 1
+
+    return score  # 0 (signal baissier fort) → 10 (signal haussier fort)
+
+
+def score_label(score):
+    if score >= 8:
+        return "🟢🟢 Fort"
+    elif score >= 6:
+        return "🟢 Positif"
+    elif score >= 4:
+        return "⚪ Neutre"
+    elif score >= 2:
+        return "🟡 Faible"
+    else:
+        return "🔴 Négatif"
+
+# ==============================================================================
 # FONCTIONS TECHNIQUES, VOLUMES ET MACHINE LEARNING
 # ==============================================================================
 def fetch_indicators_and_predict(ticker_symbol):
     try:
         ticker = yf.Ticker(ticker_symbol)
-        df = ticker.history(period="2y") # On prend 2 ans pour avoir assez de données pour l'IA
+        df = ticker.history(period="2y")
 
         if df.empty or len(df) < 200:
             return None
@@ -100,40 +160,28 @@ def fetch_indicators_and_predict(ticker_symbol):
         # 3. MACHINE LEARNING & BACKTESTING
         prob_up = 0.0
         backtest_score = 0.0
-        ml_ok = False  # indique si la prédiction IA est exploitable
+        ml_ok = False
 
         if ML_AVAILABLE:
-            # Création de la cible : 1 si le prix monte dans les 5 prochains jours, sinon 0
             df['Target'] = (df['Close'].shift(-5) > df['Close']).astype(int)
-
-            # Variables fournies à l'IA pour apprendre
             features = ['RSI', 'MACD_Hist', 'ATR']
             ml_df = df.dropna(subset=features + ['Target']).copy()
 
             if len(ml_df) > 100:
                 X = ml_df[features]
                 y = ml_df['Target']
-
-                # Split pour le Backtest (80% passé, 20% récent)
                 split_idx = int(len(X) * 0.8)
                 X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
                 y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
 
-                # On ne tente l'apprentissage que si l'échantillon d'entraînement
-                # contient les DEUX classes (hausse ET baisse). Sinon la forêt
-                # n'apprend qu'une classe et predict_proba ne renvoie qu'une colonne.
                 if y_train.nunique() >= 2:
-                    # Entraînement de la Random Forest (La Forêt Aléatoire)
                     model = RandomForestClassifier(n_estimators=50, max_depth=5, random_state=42)
                     model.fit(X_train, y_train)
 
-                    # Score de Backtest historique (si l'échantillon test est exploitable)
                     if len(X_test) > 0:
                         y_pred = model.predict(X_test)
                         backtest_score = accuracy_score(y_test, y_pred) * 100
 
-                    # Prédiction pour aujourd'hui — on récupère la colonne de la
-                    # classe « 1 » via model.classes_ (robuste quel que soit l'ordre).
                     current_features = df[features].iloc[-1:].fillna(0)
                     proba = model.predict_proba(current_features)[0]
                     classes = list(model.classes_)
@@ -191,12 +239,12 @@ def generer_rapport():
 
     now = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
 
-    msg = "📊 " + bold("BILAN STRATÉGIQUE 10.1 (L'Oracle)") + "\n"
+    msg = "📊 " + bold("BILAN STRATÉGIQUE 11.0 (L'Oracle)") + "\n"
     msg += esc(f"🗓️ {now}") + "\n"
     msg += SEP + "\n\n"
     msg += esc(f"🌡️ MÉTÉO MARCHÉ : {meteo}") + "\n\n"
-    msg += esc("📖 Légende IA : Probabilité de hausse à 5 jours estimée par Random Forest. "
-               "Indicateur statistique, non prédictif — à interpréter avec prudence.") + "\n\n"
+    msg += esc("📖 Score conviction : RSI(3) MACD(2) SMA200(2) IA(2) Vol(1) = /10 — "
+               "IA : indicateur statistique, non prédictif.") + "\n\n"
 
     data_actifs = {}
     momentum_list = []
@@ -209,11 +257,12 @@ def generer_rapport():
             if symbol != "GC=F":
                 momentum_list.append((name, res["momentum_6m"], res["per"], res["dividend"]))
 
-    # 1. TOP MOMENTUM 6 MOIS
+    # 1. TOP MOMENTUM 6 MOIS (flèche et signe dynamiques)
     momentum_list.sort(key=lambda x: x[1], reverse=True)
     msg += "📈 " + bold("TOP MOMENTUM 6 MOIS") + "\n"
     for i, (name, val, per, div) in enumerate(momentum_list[:3], 1):
-        line = f"  {i}. {name}  +{val:.1f}%  ↗️"
+        arrow = "↗️" if val >= 0 else "↘️"
+        line = f"  {i}. {name}  {val:+.1f}%  {arrow}"
         msg += esc(line) + "\n"
     msg += "\n"
 
@@ -223,30 +272,30 @@ def generer_rapport():
     acheter, conserver, vendre = [], [], []
 
     for symbol, data in data_actifs.items():
-        per_color = "🟢" if data["per"] and data["per"] < 15 else ("🟡" if data["per"] and data["per"] <= 30 else "🟠")
-        per_str = f"{data['per']:.0f}" if data["per"] else "—"
+        conv = conviction_score(data)
+        conv_line = f"    📊 Conviction : {conv}/10 {score_label(conv)}\n"
 
-        # Formatage de la ligne d'Intelligence Artificielle.
-        # Si la prédiction n'est pas exploitable (classe unique, sklearn absent…),
-        # on l'indique explicitement plutôt que d'afficher un trompeur « 0% ».
         if data.get("ml_ok"):
             ia_color = "🟢" if data['prob_up'] > 55 else ("🔴" if data['prob_up'] < 45 else "⚪")
             ia_line = f"    🧠 IA : {data['prob_up']:.0f}% Hausse {ia_color} (Fiabilité backtest : {data['backtest']:.0f}%) | Vol: {data['vol_trend']}\n"
         else:
-            ia_line = f"    🧠 IA : indisponible (données insuffisantes) | Vol: {data['vol_trend']}\n"
+            ia_line = f"    🧠 IA : indisponible | Vol: {data['vol_trend']}\n"
 
         if data["rsi"] <= 35:
             entry = (f"  • {data['name']}  ⭐⭐\n"
                      f"    RSI {data['rsi']:.0f} | MACD ➖ | {data['bb_pos']} | Achat ✅\n"
-                     f"{ia_line}")
+                     f"{ia_line}"
+                     f"{conv_line}")
             acheter.append(esc(entry))
         elif data["rsi"] >= 70:
             entry = (f"  • {data['name']}  RSI {data['rsi']:.0f}  {data['change']:+.1f}% aujourd'hui\n"
-                     f"{ia_line}")
+                     f"{ia_line}"
+                     f"{conv_line}")
             vendre.append(esc(entry))
         else:
             entry = (f"  • {data['name']}  RSI {data['rsi']:.0f}  {data['sma_trend']}\n"
-                     f"{ia_line}")
+                     f"{ia_line}"
+                     f"{conv_line}")
             conserver.append(esc(entry))
 
     msg += "💰 " + bold("ACHETER / RENFORCER") + "\n"
@@ -282,6 +331,7 @@ def generer_rapport():
             val_actuelle = actuel_price * pos["quantite"]
             pnl_euro = val_actuelle - val_investie
             pnl_pct = (pnl_euro / val_investie) * 100
+            conv = conviction_score(data_actifs[symbol])
 
             total_investi += val_investie
             total_actuel += val_actuelle
@@ -291,7 +341,8 @@ def generer_rapport():
             block = (f"  {perf_symb} {pos['nom']}\n"
                      f"     {pos['quantite']} parts × {actuel_price:.2f}  =  {val_actuelle:.0f} €\n"
                      f"     Aujourd'hui : {data_actifs[symbol]['change']:+.1f}%\n"
-                     f"     P&L Total : {pnl_euro:+.2f} € ({pnl_pct:+.1f}%)\n\n")
+                     f"     P&L Total : {pnl_euro:+.2f} € ({pnl_pct:+.1f}%)\n"
+                     f"     📊 Conviction : {conv}/10 {score_label(conv)}\n\n")
             msg += esc(block)
 
     global_pnl_euro = total_actuel - total_investi
@@ -302,7 +353,7 @@ def generer_rapport():
     msg += esc(f"     P&L global : {global_pnl_euro:+.2f} € ({global_pnl_pct:+.1f}%)") + "\n"
 
     msg += "\n" + SEP + "\n"
-    msg += "🤖 `Analyse : RSI14 · Volatilité OBV · IA (Random Forest)`"
+    msg += "🤖 `Analyse : RSI14 · MACD · SMA200 · OBV · IA (Random Forest) · Conviction /10`"
 
     # Envoi Telegram
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -312,7 +363,7 @@ def generer_rapport():
     if not response.ok:
         print(f"Échec envoi Telegram ({response.status_code}) : {response.text}")
     else:
-        print("✅ Rapport IA envoyé avec succès !")
+        print("✅ Rapport envoyé avec succès !")
 
 if __name__ == "__main__":
     generer_rapport()
