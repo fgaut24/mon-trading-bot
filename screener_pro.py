@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import datetime
 import numpy as np
@@ -6,6 +7,15 @@ import pandas as pd
 import requests
 import yfinance as yf
 from pathlib import Path
+
+# Support optionnel d'un fichier .env pour l'exécution locale (MacBook Air).
+# Créez un fichier .env à la racine avec TELEGRAM_TOKEN et TELEGRAM_CHAT_ID,
+# puis : pip install python-dotenv
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # Sans python-dotenv, os.environ.get() fonctionne via les variables shell
 
 try:
     from sklearn.ensemble import RandomForestClassifier
@@ -52,7 +62,7 @@ CAC_40 = {
     "STLAM.MI": "Stellantis",
     "MT.AS":    "ArcelorMittal",
     "ML.PA":    "Michelin",
-    "GLE.PA":   "Soc. Générale",
+    "STM.PA":   "STMicro",
     # Banque & assurance
     "BNP.PA":   "BNP Paribas",
     "ACA.PA":   "Crédit Agricole",
@@ -134,9 +144,63 @@ def envoyer_telegram(texte, chat_id, token):
             print(f"✅ Message {i}/{len(blocs)} envoyé ({len(bloc)} car.)")
 
 # ==============================================================================
+# CONTEXTE MACROÉCONOMIQUE — VIX & Taux 10 ans US
+# ==============================================================================
+def get_macro_context():
+    """
+    Récupère le VIX (peur du marché) et le taux à 10 ans US (^TNX).
+    Retourne un régime + un modificateur appliqué à toutes les convictions.
+    """
+    try:
+        vix = yf.Ticker("^VIX").history(period="5d")["Close"].iloc[-1]
+        tnx = yf.Ticker("^TNX").history(period="5d")["Close"].iloc[-1]
+        if   vix < 15:  regime, modifier = "🟢 CALME",    0
+        elif vix < 22:  regime, modifier = "🟡 VIGILANCE", 0
+        elif vix < 30:  regime, modifier = "🟠 TENSION",  -1
+        else:           regime, modifier = "🔴 PANIQUE",  -2
+        return {"vix": round(vix, 1), "tnx": round(tnx, 2),
+                "regime": regime, "modifier": modifier}
+    except Exception as e:
+        print(f"Avertissement macro : {e}")
+        return {"vix": None, "tnx": None,
+                "regime": "⚪ NEUTRE (données indispo)", "modifier": 0}
+
+# ==============================================================================
+# AJUSTEMENT FONDAMENTAL — PER & marge opérationnelle
+# ==============================================================================
+def fundamental_adjustment(per, margin, macro_tnx):
+    """
+    Retourne un ajustement (-2 à +2) à appliquer à la conviction technique.
+    Ne s'applique pas aux ETF (per et margin non disponibles).
+
+    Logique :
+      - PER bas (<12) = bon point, PER élevé (>30) = mauvais point
+      - Si taux 10 ans US > 4,2 % et PER > 25 : pénalité supplémentaire
+        (l'argent coûte cher, les valorisations élevées sont plus risquées)
+      - Marge opérationnelle > 15 % = bonus, < 3 % = malus
+    """
+    adj = 0
+    if per is not None and isinstance(per, (int, float)) and per > 0:
+        if   per < 12:                 adj += 1
+        elif per > 30:                 adj -= 1
+        if macro_tnx and macro_tnx > 4.2 and per > 25:
+            adj -= 1
+    if margin is not None and isinstance(margin, (int, float)):
+        if   margin > 0.15:            adj += 1
+        elif margin < 0.03:            adj -= 1
+    return max(-2, min(2, adj))
+
+# ==============================================================================
 # SCORE DE CONVICTION COMPOSITE (0 → 10)
 # ==============================================================================
-def conviction_score(data):
+def conviction_score(data, macro_modifier=0, macro_tnx=None):
+    """
+    Score de conviction 0-10. Composition :
+      - Technique (RSI, MACD, SMA200, IA, Volume OBV) : 0-10 pts
+      - Ajustement fondamental (PER, marges) : -2 à +2 (si action)
+      - Modificateur macro (VIX) : -2 à 0
+    Clampé entre 0 et 10.
+    """
     score = 0
     rsi = data["rsi"]
     if   rsi <= 35: score += 3
@@ -150,7 +214,15 @@ def conviction_score(data):
     else:
         score += 1
     if data["vol_trend"] == "📈": score += 1
-    return score
+
+    # Ajustement fondamental (actions uniquement — pour les ETF, per/margin sont None)
+    fonda_adj = fundamental_adjustment(data.get("per"), data.get("margin"), macro_tnx)
+    score += fonda_adj
+
+    # Modificateur macro global
+    score += macro_modifier
+
+    return max(0, min(10, score))
 
 def score_label(score):
     if   score >= 8: return "🟢🟢 Fort"
@@ -246,14 +318,14 @@ def verdict_action(data, conv):
     return (f"🟡 PRUDENCE — signaux faibles\n"
             f"   J'envisage d'alléger si position importante.")
 
-def generer_resume_executif(data_actifs):
+def generer_resume_executif(data_actifs, macro_mod=0, macro_tnx=None):
     sorted_items = sorted(data_actifs.items(),
-                          key=lambda x: conviction_score(x[1]), reverse=True)
+                          key=lambda x: conviction_score(x[1], macro_mod, macro_tnx), reverse=True)
     lines = []
     achats   = [(s,d) for s,d in sorted_items if d["rsi"] <= 38]
     ventes   = [(s,d) for s,d in sorted_items if d["rsi"] >= 70]
     top_conv = [(s,d) for s,d in sorted_items
-                if conviction_score(d) >= 7 and d["rsi"] < 70]
+                if conviction_score(d, macro_mod, macro_tnx) >= 7 and d["rsi"] < 70]
     if achats:
         noms = " et ".join(d["name"] for _,d in achats[:2])
         lines.append(f"⭐ {noms} en zone de survente — entrée potentielle")
@@ -418,9 +490,13 @@ def fetch_indicators_and_predict(ticker_symbol):
         else:
             div_str = "—"
 
+        # Marge opérationnelle (pour analyse fondamentale)
+        margin = info.get("operatingMargins")
+
         return {
             "price":       current_price,
             "change":      ((current_price - prev_row['Close']) / prev_row['Close']) * 100,
+            "margin":      margin,
             "rsi":         last_row['RSI'],
             "macd_trend":  "🍏" if last_row['MACD'] > last_row['Signal'] else "🔻",
             "bb_pos":      ("BB BAS" if current_price <= last_row['BB_Low'] else
@@ -450,13 +526,19 @@ def generer_rapport():
     SEP = "════════════════════════════════"
     historique = charger_historique()
 
-    try:
-        vix   = yf.Ticker("^VIX").history(period="1d")['Close'].iloc[-1]
-        meteo = f"🟢 CALME ({vix:.1f})" if vix < 20 else f"🔴 NERVEUX ({vix:.1f})"
-        meteo_note = "Conditions favorables." if vix < 20 else "Volatilité élevée — signaux moins fiables."
-    except:
-        meteo = "🟢 CALME (18.5)"
-        meteo_note = "Conditions favorables."
+    # ── Contexte macroéconomique global ──────────────────────────────────────
+    macro = get_macro_context()
+    macro_mod = macro["modifier"]
+    macro_tnx = macro["tnx"]
+
+    if macro["vix"] is not None:
+        meteo = f"{macro['regime']} (VIX {macro['vix']} · US10Y {macro['tnx']}%)"
+        if   macro_mod == 0:  meteo_note = "Conditions favorables — convictions non pénalisées."
+        elif macro_mod == -1: meteo_note = "Tension de marché — convictions ajustées de -1."
+        else:                 meteo_note = "Panique de marché — convictions ajustées de -2."
+    else:
+        meteo = macro["regime"]
+        meteo_note = "Données macro indisponibles — convictions non ajustées."
 
     now = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
 
@@ -470,7 +552,7 @@ def generer_rapport():
 
     validation   = valider_predictions(data_actifs, historique)
     sorted_items = sorted(data_actifs.items(),
-                          key=lambda x: conviction_score(x[1]), reverse=True)
+                          key=lambda x: conviction_score(x[1], macro_mod, macro_tnx), reverse=True)
 
     n_actifs = len(data_actifs)
 
@@ -480,11 +562,12 @@ def generer_rapport():
     m1  = "📊 " + bold(f"ORACLE CAC 40 — {now}") + "\n"
     m1 += esc(f"({n_actifs} valeurs analysées — CAC 40 + ETF PEA)") + "\n"
     m1 += SEP + "\n"
-    m1 += esc(f"🌡️ {meteo}  {meteo_note}") + "\n\n"
+    m1 += esc(f"🌡️ {meteo}") + "\n"
+    m1 += esc(f"   {meteo_note}") + "\n\n"
 
     # Résumé exécutif
     m1 += bold("CE QU'IL FAUT RETENIR") + "\n"
-    for line in generer_resume_executif(data_actifs):
+    for line in generer_resume_executif(data_actifs, macro_mod, macro_tnx):
         m1 += esc(f"  {line}") + "\n"
     m1 += "\n"
 
@@ -495,12 +578,12 @@ def generer_rapport():
     m1 += "\n" + SEP + "\n\n"
 
     # Signaux forts (top 5, RSI < 70)
-    forts = [(s,d) for s,d in sorted_items if conviction_score(d) >= 6 and d["rsi"] < 70][:5]
+    forts = [(s,d) for s,d in sorted_items if conviction_score(d, macro_mod, macro_tnx) >= 6 and d["rsi"] < 70][:5]
     if forts:
         m1 += bold("🎯 SIGNAUX FORTS") + "\n"
         m1 += esc("   Niveaux ATR — signaux techniques, pas un conseil financier.") + "\n\n"
         for symbol, data in forts:
-            conv     = conviction_score(data)
+            conv     = conviction_score(data, macro_mod, macro_tnx)
             rsi_flag = " ⭐" if data["rsi"] <= 35 else ""
             m1 += esc(f"• {data['name']}{rsi_flag}") + "  " + bold(f"{conv}/10") + "\n"
             m1 += esc(f"  {interpreter_signal(data)}") + "\n"
@@ -511,7 +594,7 @@ def generer_rapport():
     if surachat:
         m1 += bold("⚠️ ALERTES SURACHAT") + "\n\n"
         for symbol, data in surachat:
-            conv = conviction_score(data)
+            conv = conviction_score(data, macro_mod, macro_tnx)
             m1 += esc(f"• {data['name']}  RSI {data['rsi']:.0f}  {data['change']:+.1f}% aujourd'hui") + "\n"
             m1 += esc(f"  {interpreter_signal(data)}") + "\n"
             m1 += esc(f"  {verdict_action(data, conv)}") + "\n\n"
@@ -528,7 +611,7 @@ def generer_rapport():
             val_actuelle = actuel_price * pos["quantite"]
             pnl_euro     = val_actuelle - val_investie
             pnl_pct      = (pnl_euro / val_investie) * 100
-            conv         = conviction_score(data_actifs[symbol])
+            conv         = conviction_score(data_actifs[symbol], macro_mod, macro_tnx)
             total_investi += val_investie
             total_actuel  += val_actuelle
             perf_s = "🟢" if pnl_euro >= 0 else "🔴"
@@ -550,7 +633,7 @@ def generer_rapport():
     m2 += SEP + "\n\n"
 
     for symbol, data in sorted_items:
-        conv   = conviction_score(data)
+        conv   = conviction_score(data, macro_mod, macro_tnx)
         s_e    = score_emoji(conv)
         flag_r = " ⭐" if data["rsi"] <= 35 else (" ⚠️" if data["rsi"] >= 70 else "  ")
         ia_s   = f"IA {data['prob_up']:.0f}%" if data.get("ml_ok") else "IA —"
@@ -582,7 +665,7 @@ def generer_rapport():
             m2 += esc(f"  ❌ {worst['name']} : {dir_p} ({worst['prob_up']:.0f}%) → {dir_r} {worst['variation']:+.1f}%") + "\n"
         m2 += "\n" + SEP + "\n"
 
-    m2 += "\n🤖 `RSI · MACD · SMA200 · OBV · IA Random Forest 7 features · Conviction /10`\n"
+    m2 += "\n🤖 `RSI · MACD · SMA200 · OBV · IA 7 features · Conviction /10 · Fonda PER+Marge · Macro VIX+US10Y`\n"
     m2 += esc("⚠️ Niveaux ATR indicatifs — pas un conseil financier.")
 
     # ── Envoi des deux messages ───────────────────────────────────────────────
@@ -591,5 +674,123 @@ def generer_rapport():
 
     sauvegarder_historique(historique, data_actifs)
 
+# ==============================================================================
+# MODE ALERTE — message court, uniquement sur signaux urgents
+# Critères d'envoi :
+#   - Achat urgent  : RSI ≤ 38 ET conviction ≥ 7  (signal fort confirmé)
+#   - Vente urgente : RSI ≥ 75 ET conviction ≤ 3  (surachat convergent)
+# Aucun message envoyé si aucun critère n'est atteint.
+# ==============================================================================
+def generer_alertes():
+    macro = get_macro_context()
+    macro_mod = macro["modifier"]
+    macro_tnx = macro["tnx"]
+
+    data_actifs = {}
+    for symbol, name in TICKERS.items():
+        res = fetch_indicators_and_predict(symbol)
+        if res:
+            res["name"] = name
+            data_actifs[symbol] = res
+
+    achats = sorted(
+        [(s, d) for s, d in data_actifs.items()
+         if d["rsi"] <= 38 and conviction_score(d, macro_mod, macro_tnx) >= 7],
+        key=lambda x: conviction_score(x[1], macro_mod, macro_tnx), reverse=True
+    )
+    ventes = sorted(
+        [(s, d) for s, d in data_actifs.items()
+         if d["rsi"] >= 75 and conviction_score(d, macro_mod, macro_tnx) <= 3],
+        key=lambda x: conviction_score(x[1], macro_mod, macro_tnx)
+    )
+
+    if not achats and not ventes:
+        print("Aucun signal urgent — aucun message envoyé.")
+        return
+
+    SEP = "════════════════════"
+    now = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
+    n   = len(achats) + len(ventes)
+
+    msg  = "🚨 " + bold("ALERTE ORACLE — " + now) + "\n"
+    msg += esc(f"  {n} signal(s) urgent(s) sur {len(data_actifs)} valeurs analysées") + "\n"
+    msg += SEP + "\n\n"
+
+    if achats:
+        msg += bold("📈 ACHAT / RENFORCEMENT") + "\n\n"
+        for symbol, data in achats:
+            conv = conviction_score(data, macro_mod, macro_tnx)
+            msg += esc(f"• {data['name']}") + "  " + bold(f"{conv}/10") + "\n"
+            msg += esc(f"  RSI {data['rsi']:.0f}  ·  {data['price']:.2f} €  ·  {data['change']:+.1f}% auj.") + "\n"
+            ia = interpreter_ia(data)
+            if ia:
+                msg += esc(f"  {ia}") + "\n"
+            msg += esc(f"  {verdict_action(data, conv)}") + "\n\n"
+
+    if ventes:
+        msg += bold("🔴 VENTE / ALLÈGEMENT") + "\n\n"
+        for symbol, data in ventes:
+            conv = conviction_score(data, macro_mod, macro_tnx)
+            msg += esc(f"• {data['name']}") + "\n"
+            msg += esc(f"  RSI {data['rsi']:.0f}  ·  {data['price']:.2f} €  ·  {data['change']:+.1f}% auj.") + "\n"
+            msg += esc(f"  {verdict_action(data, conv)}") + "\n\n"
+
+    msg += esc("⚠️ Niveaux ATR indicatifs — pas un conseil financier.")
+    envoyer_telegram(msg, CHAT_ID, TELEGRAM_TOKEN)
+
+# ==============================================================================
+# AUTOMATISATION LOCALE — MacBook Air
+# ==============================================================================
+# OPTION A — crontab (simple, natif macOS/Linux)
+# Ouvrez le terminal et tapez : crontab -e
+# Ajoutez ces deux lignes (adaptez /chemin/vers/votre/projet) :
+#
+#   # Rapport quotidien complet — lundi à vendredi à 17h30 (heure Paris)
+#   30 17 * * 1-5 cd /chemin/projet && python screener_pro.py >> ~/oracle_rapport.log 2>&1
+#
+#   # Alertes intraday — toutes les heures entre 9h et 17h, jours ouvrés
+#   0 9-17 * * 1-5 cd /chemin/projet && python screener_pro.py --alertes >> ~/oracle_alertes.log 2>&1
+#
+# OPTION B — launchd (recommandé macOS, résiste au mode veille)
+# Créez le fichier ~/Library/LaunchAgents/com.oracle.bourse.plist avec :
+#
+# <?xml version="1.0" encoding="UTF-8"?>
+# <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+#   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+# <plist version="1.0">
+# <dict>
+#   <key>Label</key>             <string>com.oracle.bourse</string>
+#   <key>ProgramArguments</key>
+#   <array>
+#     <string>/usr/bin/python3</string>
+#     <string>/chemin/projet/screener_pro.py</string>
+#   </array>
+#   <key>EnvironmentVariables</key>
+#   <dict>
+#     <key>TELEGRAM_TOKEN</key>   <string>VOTRE_TOKEN</string>
+#     <key>TELEGRAM_CHAT_ID</key> <string>VOTRE_CHAT_ID</string>
+#   </dict>
+#   <key>StartCalendarInterval</key>
+#   <dict>
+#     <key>Hour</key>    <integer>17</integer>
+#     <key>Minute</key>  <integer>30</integer>
+#     <key>Weekday</key> <integer>1</integer>
+#   </dict>
+#   <key>StandardOutPath</key>  <string>/tmp/oracle_rapport.log</string>
+#   <key>StandardErrorPath</key><string>/tmp/oracle_rapport_err.log</string>
+# </dict>
+# </plist>
+#
+# Activez-le : launchctl load ~/Library/LaunchAgents/com.oracle.bourse.plist
+# Désactivez : launchctl unload ~/Library/LaunchAgents/com.oracle.bourse.plist
+#
+# NOTE : GitHub Actions reste la solution recommandée — elle ne dépend pas
+# du Mac étant allumé et connecté. Le crontab/launchd est utile si vous
+# souhaitez les alertes intraday à une fréquence supérieure à ce qu'Actions permet.
+# ==============================================================================
+
 if __name__ == "__main__":
-    generer_rapport()
+    if "--alertes" in sys.argv:
+        generer_alertes()
+    else:
+        generer_rapport()
