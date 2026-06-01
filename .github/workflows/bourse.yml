@@ -6,28 +6,34 @@ permissions:
 
 on:
   schedule:
-    # GitHub Actions utilise l'heure UTC.
-    # 17:00 UTC = 18:00 en hiver (CET) / 19:00 en été (CEST).
-    # Tous les jours ouvrés (lundi → vendredi) à 17:00 UTC.
-    - cron: "0 17 * * 1-5"
+    # GitHub Actions raisonne en heure UTC.
+    # 16:45 UTC = 18:45 en été (CEST) / 17:45 en hiver (CET)
+    # → toujours après la clôture de la Bourse de Paris (17:30 locale).
+    - cron: "45 16 * * 1-5"
+  # Permet de lancer le robot à la main via le bouton "Run workflow" :
   workflow_dispatch:
 
 jobs:
   rapport:
     runs-on: ubuntu-latest
     steps:
+      # 1. Récupère le contenu de votre dépôt (dont screener_pro.py et requirements.txt)
       - name: Récupérer le code
         uses: actions/checkout@v4
 
+      # 2. Installe Python (avec mise en cache des dépendances pour accélérer)
       - name: Installer Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
 
+      # 3. Installe TOUTES les bibliothèques depuis le fichier centralisé
       - name: Installer les dépendances
         run: pip install -r requirements.txt
 
+      # 4. Lance le robot. Les secrets du dépôt sont injectés ici en variables
+      #    d'environnement, sous les noms EXACTS que lit votre script Python.
       - name: Lancer le screener
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
