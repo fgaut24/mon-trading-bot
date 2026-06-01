@@ -52,7 +52,7 @@ CAC_40 = {
     "STLAM.MI": "Stellantis",
     "MT.AS":    "ArcelorMittal",
     "ML.PA":    "Michelin",
-    "STMA.PA":   "STMicro",
+    "GLE.PA":   "Soc. Générale",
     # Banque & assurance
     "BNP.PA":   "BNP Paribas",
     "ACA.PA":   "Crédit Agricole",
