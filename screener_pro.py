@@ -62,7 +62,7 @@ CAC_40 = {
     "STLAM.MI": "Stellantis",
     "MT.AS":    "ArcelorMittal",
     "ML.PA":    "Michelin",
-    "STMPA.PA":   "STMicro",
+    "STM.PA":   "STMicro",
     # Banque & assurance
     "BNP.PA":   "BNP Paribas",
     "ACA.PA":   "Crédit Agricole",
@@ -100,14 +100,7 @@ ETF_PEA = {
     "CACC.PA":  "ETF CAC 40",
 }
 
-TICKERS = [
-    "MC.PA",   # LVMH
-    "KER.PA",  # Kering
-    "RMS.PA",  # Hermès
-    "OR.PA",   # L'Oréal
-    "EL.PA",   # EssilorLuxottica
-    "SAN.PA"   # Sanofi
-]
+TICKERS = {**CAC_40, **ETF_PEA}   # 47 actifs au total
 
 portefeuille = {
     "MC.PA": {"nom": "LVMH", "prix_achat": 458.45, "quantite": 1}
