@@ -100,7 +100,14 @@ ETF_PEA = {
     "CACC.PA":  "ETF CAC 40",
 }
 
-TICKERS = {**CAC_40, **ETF_PEA}   # 47 actifs au total
+TICKERS = [
+    "MC.PA",   # LVMH
+    "KER.PA",  # Kering
+    "RMS.PA",  # Hermès
+    "OR.PA",   # L'Oréal
+    "EL.PA",   # EssilorLuxottica
+    "SAN.PA"   # Sanofi
+]
 
 portefeuille = {
     "MC.PA": {"nom": "LVMH", "prix_achat": 458.45, "quantite": 1}
