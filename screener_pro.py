@@ -1,3 +1,20 @@
+"""
+Systeme d'analyse multi-couches du CAC 40 et des ETF PEA
+=========================================================
+Outil d'AIDE A LA DECISION et de VEILLE. Il produit un rapport quotidien
+combinant analyse technique, intelligence artificielle, fondamentale et
+macroeconomique, envoye sur Telegram.
+
+AVERTISSEMENT IMPORTANT :
+Ce systeme N'EXECUTE AUCUN ORDRE de bourse. Il ne passe ni achat ni vente.
+Il fournit de l'INFORMATION et des SIGNAUX D'ANALYSE, jamais des instructions
+a executer automatiquement. Toute decision d'investissement releve de
+l'utilisateur seul. Les niveaux affiches (entree, objectif, stop) sont des
+reperes techniques indicatifs, en aucun cas un conseil en investissement.
+
+Les performances passees ne prejugent pas des resultats futurs.
+"""
+
 import os
 import sys
 import json
@@ -559,7 +576,7 @@ def generer_rapport():
     # ══════════════════════════════════════════════════════════════════════════
     # MESSAGE 1 : INTELLIGENCE ACTIONNABLE
     # ══════════════════════════════════════════════════════════════════════════
-    m1  = "📊 " + bold(f"ORACLE CAC 40 — {now}") + "\n"
+    m1  = "📊 " + bold(f"ANALYSE CAC 40 — {now}") + "\n"
     m1 += esc(f"({n_actifs} valeurs analysées — CAC 40 + ETF PEA)") + "\n"
     m1 += SEP + "\n"
     m1 += esc(f"🌡️ {meteo}") + "\n"
@@ -666,7 +683,7 @@ def generer_rapport():
         m2 += "\n" + SEP + "\n"
 
     m2 += "\n🤖 `RSI · MACD · SMA200 · OBV · IA 7 features · Conviction /10 · Fonda PER+Marge · Macro VIX+US10Y`\n"
-    m2 += esc("⚠️ Niveaux ATR indicatifs — pas un conseil financier.")
+    m2 += esc("⚠️ Systeme d'analyse — n'execute aucun ordre. Reperes indicatifs, pas un conseil financier.")
 
     # ── Envoi des deux messages ───────────────────────────────────────────────
     envoyer_telegram(m1, CHAT_ID, TELEGRAM_TOKEN)
@@ -712,7 +729,7 @@ def generer_alertes():
     now = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
     n   = len(achats) + len(ventes)
 
-    msg  = "🚨 " + bold("ALERTE ORACLE — " + now) + "\n"
+    msg  = "🚨 " + bold("ALERTE ANALYSE — " + now) + "\n"
     msg += esc(f"  {n} signal(s) urgent(s) sur {len(data_actifs)} valeurs analysées") + "\n"
     msg += SEP + "\n\n"
 
@@ -735,7 +752,7 @@ def generer_alertes():
             msg += esc(f"  RSI {data['rsi']:.0f}  ·  {data['price']:.2f} €  ·  {data['change']:+.1f}% auj.") + "\n"
             msg += esc(f"  {verdict_action(data, conv)}") + "\n\n"
 
-    msg += esc("⚠️ Niveaux ATR indicatifs — pas un conseil financier.")
+    msg += esc("⚠️ Systeme d'analyse — n'execute aucun ordre. Reperes indicatifs, pas un conseil financier.")
     envoyer_telegram(msg, CHAT_ID, TELEGRAM_TOKEN)
 
 # ==============================================================================
