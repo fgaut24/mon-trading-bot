@@ -5,7 +5,7 @@ Teste si la stratégie Random Forest + conviction surperforme un simple
 investissement Buy & Hold sur 4 ans, sans biais d'anticipation (look-ahead).
 
 Usage :
-  python backtest_bourse.py                     → tous les actifs
+  python backtest_bourse.py                 → tous les actifs
   python backtest_bourse.py --ticker MC.PA      → actif unique
   python backtest_bourse.py --periode 2y        → période personnalisée
   python backtest_bourse.py --vider-cache       → force le retéléchargement
@@ -52,14 +52,14 @@ except ImportError:
 # CONFIGURATION — alignée sur screener_pro.py
 # ==============================================================================
 
+# SELECTION STRATÉGIQUE LUXE & SANTÉ (Aligné avec screener_pro.py)
 TICKERS_BACKTEST = {
-    "MC.PA":   "LVMH",
-    "TTE.PA":  "TotalEnergies",
-    "OR.PA":   "L'Oréal",
-    "SAN.PA":  "Sanofi",
-    "AI.PA":   "Air Liquide",
-    "SU.PA":   "Schneider Elec",
-    "WPEA.PA": "ETF MSCI World",
+    "MC.PA":    "LVMH",
+    "KER.PA":   "Kering",
+    "RMS.PA":   "Hermès",
+    "OR.PA":    "L'Oréal",
+    "EL.PA":    "EssilorLuxottica",
+    "SAN.PA":   "Sanofi"
 }
 
 PERIODE        = "4y"   # Historique (modifiable via --periode)
@@ -294,7 +294,7 @@ def evaluer_modele_tscv(df_clean: pd.DataFrame, n_splits: int = 5) -> dict:
             continue
 
         model = RandomForestClassifier(n_estimators=50, max_depth=5,
-                                        random_state=42, n_jobs=-1)
+                                       random_state=42, n_jobs=-1)
         model.fit(X_train, y_train)
         acc = accuracy_score(y_test, model.predict(X_test)) * 100
         scores.append(acc)
