@@ -64,6 +64,27 @@ SEUIL_ACHAT    = 6    # conviction > 6/10 → achat
 SEUIL_VENTE    = 4    # conviction < 4/10 → vente
 RSI_SURACHAT   = 75   # RSI > 75         → vente forcée
 
+# ── Frais & fiscalité ─────────────────────────────────────────────────────────
+# Frais de courtage + spread estimés par transaction (aller OU retour).
+# 0,15 % est une estimation réaliste pour un courtier en ligne européen
+# (un aller-retour coûte donc ~0,30 %). À ajuster selon votre courtier.
+FRAIS_TRANSACTION = 0.0015   # 0,15 % par transaction
+
+# Fiscalité : un PEA exonère d'impôt sur les plus-values après 5 ans
+# (hors prélèvements sociaux de 17,2 %). Hors PEA (compte-titres ordinaire),
+# la flat tax est de 30 %. Le backtest applique le régime PEA par défaut
+# car les actifs surveillés y sont éligibles.
+TAUX_PRELEV_SOCIAUX = 0.172  # 17,2 % sur la plus-value nette (PEA > 5 ans)
+TAUX_FLAT_TAX       = 0.30   # 30 % hors PEA (référence comparative)
+
+JOURS_BOURSE_AN = 252        # nombre de séances par an (annualisation)
+TAUX_SANS_RISQUE = 0.03      # 3 % — proxy du taux sans risque pour Sharpe
+
+# ETF de référence pour la comparaison passive systématique.
+# CW8 (Amundi MSCI World) a le plus long historique disponible.
+ETF_REFERENCE = "CW8.PA"
+ETF_REFERENCE_NOM = "ETF MSCI World (CW8)"
+
 # Features ML — exactement les mêmes 7 que screener_pro.py
 FEATURES = ["RSI", "MACD_Hist", "ATR",
             "Price_52W_Pct", "SMA50_vs_SMA200", "BB_Width", "Var_1M"]
@@ -241,6 +262,68 @@ def walk_forward_signaux(df_clean: pd.DataFrame) -> pd.DataFrame:
 # SIMULATION DE PORTEFEUILLE
 # ==============================================================================
 
+def metriques_avancees(courbe: pd.Series, trades: list = None) -> dict:
+    """
+    Calcule les métriques de risque-rendement à partir d'une courbe de valeur.
+
+    - Sharpe  : rendement excédentaire / volatilité totale (annualisés)
+    - Sortino : rendement excédentaire / volatilité des seules baisses
+                (pénalise uniquement le risque baissier, plus pertinent)
+    - Volatilité annualisée
+    - Durée moyenne de détention (si trades fournis)
+
+    Le ratio de Sharpe mesure le rendement obtenu par unité de risque total.
+    Le ratio de Sortino raffine en ne comptant que la volatilité négative :
+    deux stratégies au même rendement mais l'une régulière et l'autre en
+    dents de scie auront des Sortino très différents.
+    """
+    rendements = courbe.pct_change().dropna()
+    if len(rendements) < 2 or rendements.std() == 0:
+        return {"sharpe": 0.0, "sortino": 0.0, "volatilite": 0.0, "duree_moy": 0.0}
+
+    # Annualisation
+    rdt_moy_annuel = rendements.mean() * JOURS_BOURSE_AN
+    vol_annuelle   = rendements.std() * np.sqrt(JOURS_BOURSE_AN)
+
+    sharpe = (rdt_moy_annuel - TAUX_SANS_RISQUE) / vol_annuelle if vol_annuelle > 0 else 0.0
+
+    # Sortino : volatilité des seuls rendements négatifs
+    rdts_neg = rendements[rendements < 0]
+    downside_vol = rdts_neg.std() * np.sqrt(JOURS_BOURSE_AN) if len(rdts_neg) > 1 else 0.0
+    sortino = (rdt_moy_annuel - TAUX_SANS_RISQUE) / downside_vol if downside_vol > 0 else 0.0
+
+    # Durée moyenne de détention (en jours calendaires)
+    duree_moy = 0.0
+    if trades:
+        durees = [(t[2] - t[0]).days for t in trades if t[2] and t[0]]
+        duree_moy = np.mean(durees) if durees else 0.0
+
+    return {
+        "sharpe":     sharpe,
+        "sortino":    sortino,
+        "volatilite": vol_annuelle * 100,
+        "duree_moy":  duree_moy,
+    }
+
+
+def appliquer_fiscalite(capital_final: float, capital_initial: float,
+                        regime: str = "PEA") -> dict:
+    """
+    Applique la fiscalité sur la plus-value nette.
+
+    - PEA (> 5 ans)  : exonération d'IR, seuls les prélèvements sociaux (17,2 %)
+    - CTO (flat tax) : 30 % sur la plus-value
+    Si perte, aucun impôt (et report déficitaire non modélisé ici).
+    """
+    plus_value = capital_final - capital_initial
+    if plus_value <= 0:
+        return {"net": capital_final, "impot": 0.0, "regime": regime}
+
+    taux = TAUX_PRELEV_SOCIAUX if regime == "PEA" else TAUX_FLAT_TAX
+    impot = plus_value * taux
+    return {"net": capital_final - impot, "impot": impot, "regime": regime}
+
+
 def simuler_oracle(df_sig: pd.DataFrame) -> dict:
     """
     Stratégie Oracle : conviction > SEUIL_ACHAT → achat,
@@ -273,6 +356,7 @@ def simuler_oracle(df_sig: pd.DataFrame) -> dict:
     date_entree  = None
     trades       = []
     courbe       = []
+    frais_totaux = 0.0
 
     for date, row in df_sig.iterrows():
         prix = row["Close"]
@@ -280,13 +364,21 @@ def simuler_oracle(df_sig: pd.DataFrame) -> dict:
         rsi  = row["RSI"]
 
         if not en_position and conv > SEUIL_ACHAT:
-            nb_actions  = capital / prix
+            # Frais à l'achat : on prélève FRAIS_TRANSACTION sur le capital
+            frais = capital * FRAIS_TRANSACTION
+            frais_totaux += frais
+            capital_net = capital - frais
+            nb_actions  = capital_net / prix
             prix_entree = prix
             date_entree = date
             en_position = True
 
         elif en_position and (conv < SEUIL_VENTE or rsi > RSI_SURACHAT):
-            capital = nb_actions * prix
+            # Frais à la vente : on prélève FRAIS_TRANSACTION sur le produit
+            brut  = nb_actions * prix
+            frais = brut * FRAIS_TRANSACTION
+            frais_totaux += frais
+            capital = brut - frais
             gain_pct = (prix - prix_entree) / prix_entree * 100
             trades.append((date_entree, prix_entree, date, prix, gain_pct))
             nb_actions  = 0.0
@@ -295,10 +387,13 @@ def simuler_oracle(df_sig: pd.DataFrame) -> dict:
         valeur = nb_actions * prix if en_position else capital
         courbe.append(valeur)
 
-    # Fermer la position ouverte à la dernière date
+    # Fermer la position ouverte à la dernière date (avec frais de vente)
     if en_position:
         prix_fin = df_sig["Close"].iloc[-1]
-        capital  = nb_actions * prix_fin
+        brut     = nb_actions * prix_fin
+        frais    = brut * FRAIS_TRANSACTION
+        frais_totaux += frais
+        capital  = brut - frais
         trades.append((date_entree, prix_entree, df_sig.index[-1], prix_fin,
                         (prix_fin - prix_entree) / prix_entree * 100))
         courbe[-1] = capital
@@ -308,12 +403,18 @@ def simuler_oracle(df_sig: pd.DataFrame) -> dict:
     dd_max   = ((courbe_s - peak) / peak * 100).min()
 
     nb_win = sum(1 for t in trades if t[4] > 0)
+    metr   = metriques_avancees(courbe_s, trades)
     return {
         "capital_final":    capital,
         "rendement_total":  (capital / CAPITAL_INIT - 1) * 100,
         "drawdown_max":     dd_max,
         "win_rate":         (nb_win / len(trades) * 100) if trades else 0.0,
         "nb_trades":        len(trades),
+        "frais_totaux":     frais_totaux,
+        "sharpe":           metr["sharpe"],
+        "sortino":          metr["sortino"],
+        "volatilite":       metr["volatilite"],
+        "duree_moy":        metr["duree_moy"],
         "courbe":           courbe_s,
         "trades":           trades,
     }
@@ -323,54 +424,127 @@ def simuler_buy_hold(df_sig: pd.DataFrame) -> dict:
     """Buy & Hold : achat dès le 1er jour, conservation jusqu'à la fin."""
     p0    = df_sig["Close"].iloc[0]
     pn    = df_sig["Close"].iloc[-1]
-    cap_f = CAPITAL_INIT * pn / p0
-    courbe = CAPITAL_INIT * df_sig["Close"] / p0
+    # Un seul aller-retour de frais (achat au début, vente à la fin)
+    cap_apres_achat = CAPITAL_INIT * (1 - FRAIS_TRANSACTION)
+    nb_actions = cap_apres_achat / p0
+    cap_brut   = nb_actions * pn
+    cap_f      = cap_brut * (1 - FRAIS_TRANSACTION)
+    courbe = nb_actions * df_sig["Close"]
     peak   = courbe.cummax()
     dd_max = ((courbe - peak) / peak * 100).min()
+    metr   = metriques_avancees(courbe)
     return {
         "capital_final":   cap_f,
         "rendement_total": (cap_f / CAPITAL_INIT - 1) * 100,
         "drawdown_max":    dd_max,
+        "sharpe":          metr["sharpe"],
+        "sortino":         metr["sortino"],
+        "volatilite":      metr["volatilite"],
         "courbe":          courbe,
     }
+
+
+def simuler_etf_reference(date_debut, date_fin) -> dict:
+    """
+    Simule un Buy & Hold sur l'ETF de référence (MSCI World) sur la même
+    période, pour comparer systématiquement à un investissement passif
+    diversifié plutôt qu'au seul actif analysé.
+    Retourne None si l'historique de l'ETF ne couvre pas la période.
+    """
+    try:
+        df = yf.Ticker(ETF_REFERENCE).history(start=date_debut, end=date_fin)
+        if df.empty or len(df) < 30:
+            return None
+        p0, pn = df["Close"].iloc[0], df["Close"].iloc[-1]
+        cap_apres_achat = CAPITAL_INIT * (1 - FRAIS_TRANSACTION)
+        nb = cap_apres_achat / p0
+        cap_f = (nb * pn) * (1 - FRAIS_TRANSACTION)
+        courbe = nb * df["Close"]
+        peak = courbe.cummax()
+        dd = ((courbe - peak) / peak * 100).min()
+        metr = metriques_avancees(courbe)
+        return {
+            "capital_final":   cap_f,
+            "rendement_total": (cap_f / CAPITAL_INIT - 1) * 100,
+            "drawdown_max":    dd,
+            "sharpe":          metr["sharpe"],
+            "sortino":         metr["sortino"],
+        }
+    except Exception as e:
+        print(f"  Avertissement ETF référence : {e}")
+        return None
 
 # ==============================================================================
 # AFFICHAGE
 # ==============================================================================
 
 def afficher_tableau(nom, res_ml, res_bh, tscv_info,
-                     date_debut, date_fin) -> None:
+                     date_debut, date_fin, res_etf=None) -> None:
     annees     = (date_fin - date_debut).days / 365.25
     rend_an_ml = ((1 + res_ml["rendement_total"] / 100) ** (1 / annees) - 1) * 100
     rend_an_bh = ((1 + res_bh["rendement_total"] / 100) ** (1 / annees) - 1) * 100
 
-    print(f"\n{'═' * 62}")
+    # Fiscalité PEA appliquée aux capitaux finaux
+    fisc_ml = appliquer_fiscalite(res_ml["capital_final"], CAPITAL_INIT, "PEA")
+    fisc_bh = appliquer_fiscalite(res_bh["capital_final"], CAPITAL_INIT, "PEA")
+
+    L = 70
+    print(f"\n{'═' * L}")
     print(f"  {nom}")
     print(f"  {date_debut.date()} → {date_fin.date()}  "
           f"({annees:.1f} ans · TSCV accuracy : "
           f"{tscv_info['accuracy_moyenne']:.1f}% ± {tscv_info['accuracy_ecart']:.1f}%)")
-    print(f"{'═' * 62}")
-    print(f"  {'Métrique':<32} {'Oracle ML':>12} {'Buy & Hold':>12}")
-    print(f"  {'─' * 56}")
-    print(f"  {'Rendement total':<32} {res_ml['rendement_total']:>+11.1f}%"
-          f" {res_bh['rendement_total']:>+11.1f}%")
-    print(f"  {'Rendement annualisé':<32} {rend_an_ml:>+11.1f}%"
-          f" {rend_an_bh:>+11.1f}%")
-    print(f"  {'Drawdown maximum':<32} {res_ml['drawdown_max']:>+11.1f}%"
-          f" {res_bh['drawdown_max']:>+11.1f}%")
-    print(f"  {'Win Rate':<32} {res_ml['win_rate']:>11.1f}%          —")
-    print(f"  {'Nombre de trades':<32} {res_ml['nb_trades']:>12}          —")
+    print(f"{'═' * L}")
+    print(f"  {'Métrique':<34} {'Stratégie':>14} {'Buy & Hold':>14}")
+    print(f"  {'─' * 64}")
+    print(f"  {'Rendement total (brut)':<34} {res_ml['rendement_total']:>+13.1f}%"
+          f" {res_bh['rendement_total']:>+13.1f}%")
+    print(f"  {'Rendement annualisé':<34} {rend_an_ml:>+13.1f}%"
+          f" {rend_an_bh:>+13.1f}%")
+    print(f"  {'Drawdown maximum':<34} {res_ml['drawdown_max']:>+13.1f}%"
+          f" {res_bh['drawdown_max']:>+13.1f}%")
+    print(f"  {'Volatilité annualisée':<34} {res_ml.get('volatilite',0):>13.1f}%"
+          f" {res_bh.get('volatilite',0):>13.1f}%")
+    print(f"  {'Ratio de Sharpe':<34} {res_ml.get('sharpe',0):>14.2f}"
+          f" {res_bh.get('sharpe',0):>14.2f}")
+    print(f"  {'Ratio de Sortino':<34} {res_ml.get('sortino',0):>14.2f}"
+          f" {res_bh.get('sortino',0):>14.2f}")
+    print(f"  {'─' * 64}")
+    print(f"  {'Win Rate':<34} {res_ml['win_rate']:>13.1f}%   {'—':>13}")
+    print(f"  {'Nombre de trades':<34} {res_ml['nb_trades']:>14}   {'—':>13}")
+    print(f"  {'Durée moy. détention (jours)':<34} {res_ml.get('duree_moy',0):>14.0f}   {'—':>13}")
+    print(f"  {'Frais de transaction cumulés':<34} {res_ml.get('frais_totaux',0):>12.0f} €   {'~30 €':>13}")
+    print(f"  {'─' * 64}")
+    print(f"  Après fiscalité PEA (prélèvements sociaux 17,2 % sur plus-value) :")
+    print(f"  {'Capital net final':<34} {fisc_ml['net']:>12.0f} €   {fisc_bh['net']:>11.0f} €")
+    print(f"  {'Impôt (prélèvements sociaux)':<34} {fisc_ml['impot']:>12.0f} €   {fisc_bh['impot']:>11.0f} €")
+
+    # Comparaison ETF World de référence
+    if res_etf:
+        print(f"  {'─' * 64}")
+        print(f"  Référence passive — {ETF_REFERENCE_NOM} sur la même période :")
+        print(f"  {'Rendement total':<34} {res_etf['rendement_total']:>+13.1f}%")
+        print(f"  {'Drawdown maximum':<34} {res_etf['drawdown_max']:>+13.1f}%")
+        print(f"  {'Ratio de Sharpe':<34} {res_etf.get('sharpe',0):>14.2f}")
 
     ecart = res_ml["rendement_total"] - res_bh["rendement_total"]
-    if   ecart >  5: verdict = f"✅ Oracle surperforme Buy & Hold de {ecart:+.1f}%"
-    elif ecart < -5: verdict = f"⚠️  Buy & Hold surperforme Oracle de {-ecart:.1f}%"
+    if   ecart >  5: verdict = f"✅ La stratégie surperforme Buy & Hold de {ecart:+.1f}%"
+    elif ecart < -5: verdict = f"⚠️  Buy & Hold surperforme la stratégie de {-ecart:.1f}%"
     else:            verdict = f"⚪  Performances similaires (écart {ecart:+.1f}%)"
     print(f"\n  {verdict}")
-    print(f"{'═' * 62}")
+
+    # Verdict Sharpe (qualité du rendement ajusté du risque)
+    s_ml, s_bh = res_ml.get("sharpe",0), res_bh.get("sharpe",0)
+    if s_ml > s_bh + 0.1:
+        print(f"  📊 Meilleur rendement ajusté du risque (Sharpe {s_ml:.2f} vs {s_bh:.2f})")
+    elif s_bh > s_ml + 0.1:
+        print(f"  📊 Buy & Hold offre un meilleur rendement ajusté du risque "
+              f"(Sharpe {s_bh:.2f} vs {s_ml:.2f})")
+    print(f"{'═' * L}")
 
     # Détail des trades
     if res_ml["trades"]:
-        print(f"\n  Trades Oracle ({res_ml['nb_trades']}) :")
+        print(f"\n  Trades de la stratégie ({res_ml['nb_trades']}) :")
         for t in res_ml["trades"]:
             signe = "✅" if t[4] > 0 else "❌"
             print(f"    {signe}  {str(t[0].date()):>12} → {str(t[2].date()):>12}"
@@ -434,6 +608,14 @@ def backtester_actif(symbol: str, nom: str, periode: str = PERIODE) -> None:
     res_ml = simuler_oracle(df_signaux)
     res_bh = simuler_buy_hold(df_signaux)
 
+    # 3bis. ETF de référence passive sur la même période (sauf si on backteste l'ETF lui-même)
+    res_etf = None
+    if symbol != ETF_REFERENCE:
+        res_etf = simuler_etf_reference(
+            df_signaux.index[0].to_pydatetime(),
+            df_signaux.index[-1].to_pydatetime()
+        )
+
     # 4. Affichage + graphique
     afficher_tableau(
         nom       = f"{nom} ({symbol})",
@@ -442,6 +624,7 @@ def backtester_actif(symbol: str, nom: str, periode: str = PERIODE) -> None:
         tscv_info = tscv_info,
         date_debut = df_signaux.index[0].to_pydatetime(),
         date_fin   = df_signaux.index[-1].to_pydatetime(),
+        res_etf   = res_etf,
     )
     tracer_courbes(nom, res_ml, res_bh)
 
@@ -452,14 +635,16 @@ if __name__ == "__main__":
         i = sys.argv.index("--periode")
         periode = sys.argv[i + 1]
 
-    print("═" * 62)
-    print("  ORACLE — Backtest Machine Learning vs Buy & Hold")
+    print("═" * 70)
+    print("  Backtest — Système d'analyse vs Buy & Hold vs ETF World")
     print(f"  Période : {periode}  ·  "
           f"Achat : conviction > {SEUIL_ACHAT}/10  ·  "
           f"Vente : < {SEUIL_VENTE}/10 ou RSI > {RSI_SURACHAT}")
-    print(f"  Engine : {'VectorBT' if VBT_AVAILABLE else 'pandas (pip install vectorbt pour plus)'}  ·  "
-          f"Graphiques : {'matplotlib' if MPL_AVAILABLE else 'désactivés (pip install matplotlib)'}")
-    print("═" * 62)
+    print(f"  Frais : {FRAIS_TRANSACTION*100:.2f}%/transaction  ·  "
+          f"Fiscalité : PEA (prélèvements sociaux 17,2%)")
+    print(f"  Engine : {'VectorBT' if VBT_AVAILABLE else 'pandas'}  ·  "
+          f"Graphiques : {'matplotlib' if MPL_AVAILABLE else 'désactivés'}")
+    print("═" * 70)
 
     if "--ticker" in sys.argv:
         i = sys.argv.index("--ticker")
