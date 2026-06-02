@@ -8,6 +8,12 @@ Usage :
   python backtest_bourse.py                     → tous les actifs
   python backtest_bourse.py --ticker MC.PA      → actif unique
   python backtest_bourse.py --periode 2y        → période personnalisée
+  python backtest_bourse.py --vider-cache       → force le retéléchargement
+
+Cache : les données sont mises en cache localement dans le dossier cache/.
+Une fois téléchargées, les relances ne sollicitent plus Yahoo Finance
+(jusqu'à expiration du cache, 12h par défaut). Idéal pour tester plusieurs
+variantes de stratégie sur les mêmes données sans déclencher le rate limit.
 
 Installation des dépendances :
   pip install yfinance pandas numpy scikit-learn
@@ -16,6 +22,8 @@ Installation des dépendances :
 """
 
 import sys
+import os
+import time
 import warnings
 import datetime
 import numpy as np
@@ -85,9 +93,106 @@ TAUX_SANS_RISQUE = 0.03      # 3 % — proxy du taux sans risque pour Sharpe
 ETF_REFERENCE = "CW8.PA"
 ETF_REFERENCE_NOM = "ETF MSCI World (CW8)"
 
+# ── Cache local des données ───────────────────────────────────────────────────
+# Pour éviter le rate limit de Yahoo Finance, chaque actif n'est téléchargé
+# qu'une seule fois et stocké en CSV. Les exécutions suivantes lisent le cache.
+# Indispensable pour la Phase 3 (tester plusieurs variantes sur les mêmes données
+# sans retoucher Yahoo). Le cache expire après CACHE_VALIDITE_HEURES.
+CACHE_DIR = "cache"
+CACHE_VALIDITE_HEURES = 12   # au-delà, on retélécharge (données du jour fraîches)
+DELAI_ENTRE_REQUETES  = 2.0  # secondes de pause entre deux téléchargements Yahoo
+MAX_REESSAIS          = 3    # nombre de tentatives en cas d'échec réseau
+
 # Features ML — exactement les mêmes 7 que screener_pro.py
 FEATURES = ["RSI", "MACD_Hist", "ATR",
             "Price_52W_Pct", "SMA50_vs_SMA200", "BB_Width", "Var_1M"]
+
+# ==============================================================================
+# CACHE LOCAL DES DONNÉES — évite le rate limit Yahoo Finance
+# ==============================================================================
+
+def _chemin_cache(symbol: str) -> str:
+    """Chemin du fichier cache pour un ticker (les '.' deviennent '_')."""
+    nom = symbol.replace(".", "_").replace("^", "INDEX_")
+    return os.path.join(CACHE_DIR, f"{nom}.csv")
+
+
+def _cache_valide(chemin: str) -> bool:
+    """Vrai si le fichier cache existe et n'est pas trop ancien."""
+    if not os.path.exists(chemin):
+        return False
+    age_heures = (time.time() - os.path.getmtime(chemin)) / 3600
+    return age_heures < CACHE_VALIDITE_HEURES
+
+
+def telecharger_avec_cache(symbol: str, periode: str = "4y",
+                           start=None, end=None) -> pd.DataFrame:
+    """
+    Télécharge l'historique d'un actif via Yahoo Finance, avec cache local.
+
+    1. Si un cache valide existe, il est lu directement (aucune requête réseau).
+    2. Sinon, téléchargement avec pause + réessais en cas d'échec (rate limit).
+    3. Le résultat est sauvegardé en CSV pour les exécutions suivantes.
+
+    Si start/end sont fournis (ex. ETF de référence), on lit le cache complet
+    de la période puis on filtre sur l'intervalle demandé — sans requête réseau
+    supplémentaire si le cache couvre déjà la période.
+    """
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    chemin = _chemin_cache(symbol)
+
+    def _filtrer(df):
+        """Filtre le DataFrame sur [start, end] si demandé, en gérant le tz."""
+        if start is None or end is None or df.empty:
+            return df
+        # S'assurer que l'index est bien un DatetimeIndex
+        if not isinstance(df.index, pd.DatetimeIndex):
+            df.index = pd.to_datetime(df.index, utc=True, errors="coerce")
+        ts_start = pd.Timestamp(start)
+        ts_end   = pd.Timestamp(end)
+        tz = getattr(df.index, "tz", None)
+        if tz is not None:
+            if ts_start.tz is None: ts_start = ts_start.tz_localize(tz)
+            if ts_end.tz   is None: ts_end   = ts_end.tz_localize(tz)
+        else:
+            if ts_start.tz is not None: ts_start = ts_start.tz_localize(None)
+            if ts_end.tz   is not None: ts_end   = ts_end.tz_localize(None)
+        return df.loc[(df.index >= ts_start) & (df.index <= ts_end)]
+
+    # Lecture du cache si valide
+    if _cache_valide(chemin):
+        try:
+            df = pd.read_csv(chemin, index_col=0)
+            df.index = pd.to_datetime(df.index, utc=True, errors="coerce")
+            df = df[df.index.notna()]
+            if not df.empty:
+                print(f"  📁 Cache : {symbol} ({len(df)} séances, lu localement)")
+                return _filtrer(df)
+        except Exception as e:
+            print(f"  Cache illisible pour {symbol} ({e}), retéléchargement…")
+
+    # Téléchargement avec réessais (toujours la période complète, pour le cache)
+    for tentative in range(1, MAX_REESSAIS + 1):
+        try:
+            time.sleep(DELAI_ENTRE_REQUETES)
+            df = yf.Ticker(symbol).history(period=periode)
+            if not df.empty:
+                df.to_csv(chemin)
+                print(f"  🌐 Téléchargé : {symbol} ({len(df)} séances) → cache écrit")
+                return _filtrer(df)
+            else:
+                print(f"  Tentative {tentative}/{MAX_REESSAIS} : réponse vide "
+                      f"(rate limit probable)…")
+        except Exception as e:
+            print(f"  Tentative {tentative}/{MAX_REESSAIS} échouée : {e}")
+        if tentative < MAX_REESSAIS:
+            attente = DELAI_ENTRE_REQUETES * (tentative + 1) * 2
+            print(f"  Pause {attente:.0f}s avant réessai…")
+            time.sleep(attente)
+
+    print(f"  ❌ {symbol} : échec après {MAX_REESSAIS} tentatives (rate limit Yahoo).")
+    return pd.DataFrame()
+
 
 # ==============================================================================
 # CALCUL DES INDICATEURS (réplication fidèle de screener_pro.py)
@@ -452,7 +557,7 @@ def simuler_etf_reference(date_debut, date_fin) -> dict:
     Retourne None si l'historique de l'ETF ne couvre pas la période.
     """
     try:
-        df = yf.Ticker(ETF_REFERENCE).history(start=date_debut, end=date_fin)
+        df = telecharger_avec_cache(ETF_REFERENCE, periode="4y", start=date_debut, end=date_fin)
         if df.empty or len(df) < 30:
             return None
         p0, pn = df["Close"].iloc[0], df["Close"].iloc[-1]
@@ -576,7 +681,7 @@ def backtester_actif(symbol: str, nom: str, periode: str = PERIODE) -> None:
     print(f"\n⏳  {nom} ({symbol}) — téléchargement {periode}…")
 
     try:
-        df_raw = yf.Ticker(symbol).history(period=periode)
+        df_raw = telecharger_avec_cache(symbol, periode=periode)
     except Exception as e:
         print(f"  ❌ Impossible de récupérer les données : {e}")
         return
@@ -634,6 +739,15 @@ if __name__ == "__main__":
     if "--periode" in sys.argv:
         i = sys.argv.index("--periode")
         periode = sys.argv[i + 1]
+
+    # Option pour forcer le retéléchargement (vide le cache)
+    if "--vider-cache" in sys.argv:
+        import shutil
+        if os.path.exists(CACHE_DIR):
+            shutil.rmtree(CACHE_DIR)
+            print(f"🗑️  Cache vidé ({CACHE_DIR}/).")
+        else:
+            print("🗑️  Aucun cache à vider.")
 
     print("═" * 70)
     print("  Backtest — Système d'analyse vs Buy & Hold vs ETF World")
