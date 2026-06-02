@@ -865,7 +865,8 @@ def comparer_variantes(symbol: str, nom: str, periode: str = "4y",
     return {"train": res_train, "test": res_test, "nom": nom, "symbol": symbol}
 
 
-
+if __name__ == "__main__":
+    periode = PERIODE
     if "--periode" in sys.argv:
         i = sys.argv.index("--periode")
         periode = sys.argv[i + 1]
