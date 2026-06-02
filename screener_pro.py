@@ -49,75 +49,17 @@ CHAT_ID        = os.environ.get("TELEGRAM_CHAT_ID", "VOTRE_CHAT_ID_DE_SECOURS")
 HISTORY_FILE   = Path("predictions_history.json")
 
 # ==============================================================================
-# UNIVERS DE SURVEILLANCE — CAC 40 + ETF PEA
-# Composition officielle Euronext (révisée trimestriellement).
-# Dernière mise à jour : décembre 2025 (Eiffage entre, Edenred sort).
-# Si un ticker ne renvoie pas de données yfinance, il est silencieusement ignoré.
+# UNIVERS DE SURVEILLANCE — SÉLECTION STRATÉGIQUE LUXE & SANTÉ
+# Stratégie active sur valeurs en consolidation / forte cyclicité
 # ==============================================================================
-CAC_40 = {
-    # Luxe & consommation premium
+TICKERS = {
     "MC.PA":    "LVMH",
-    "RMS.PA":   "Hermès",
-    "OR.PA":    "L'Oreal",
     "KER.PA":   "Kering",
+    "RMS.PA":   "Hermès",
+    "OR.PA":    "L'Oréal",
     "EL.PA":    "EssilorLuxottica",
-    # Énergie
-    "TTE.PA":   "TotalEnergies",
-    "ENGI.PA":  "Engie",
-    # Industrie, aéro, défense
-    "AIR.PA":   "Airbus",
-    "SAF.PA":   "Safran",
-    "HO.PA":    "Thales",
-    "DG.PA":    "Vinci",
-    "LR.PA":    "Legrand",
-    "SU.PA":    "Schneider Elec",
-    "SGO.PA":   "Saint-Gobain",
-    "ALO.PA":   "Alstom",
-    "FGR.PA":   "Eiffage",
-    # Automobile & matériaux
-    "RNO.PA":   "Renault",
-    "STLAM.MI": "Stellantis",
-    "MT.AS":    "ArcelorMittal",
-    "ML.PA":    "Michelin",
-    "STM.PA":   "STMicro",
-    # Banque & assurance
-    "BNP.PA":   "BNP Paribas",
-    "ACA.PA":   "Crédit Agricole",
-    "GLE.PA":   "Soc. Générale",
-    "CS.PA":    "AXA",
-    # Santé
-    "SAN.PA":   "Sanofi",
-    "AI.PA":    "Air Liquide",
-    "BIM.PA":   "bioMérieux",
-    # Services & utilities
-    "VIE.PA":   "Veolia",
-    "ORA.PA":   "Orange",
-    "EN.PA":    "Bouygues",
-    "URW.PA":   "Unibail",
-    # Tech & médias
-    "CAP.PA":   "Capgemini",
-    "DSY.PA":   "Dassault Sys.",
-    "PUB.PA":   "Publicis",
-    "WLN.PA":   "Worldline",
-    # Consommation courante
-    "BN.PA":    "Danone",
-    "CA.PA":    "Carrefour",
-    "RI.PA":    "Pernod Ricard",
-    "VIV.PA":   "Vivendi",
+    "SAN.PA":   "Sanofi"
 }
-
-ETF_PEA = {
-    # Indices larges — éligibles PEA via réplication synthétique
-    "WPEA.PA":  "ETF MSCI World",
-    "CW8.PA":   "ETF Monde CW8",
-    "PANX.PA":  "ETF Nasdaq-100",
-    "PSP5.PA":  "ETF S&P 500",
-    "PAEEM.PA": "ETF Émergents",
-    "MEUD.PA":  "ETF Europe 600",
-    "CACC.PA":  "ETF CAC 40",
-}
-
-TICKERS = {**CAC_40, **ETF_PEA}   # 47 actifs au total
 
 portefeuille = {
     "MC.PA": {"nom": "LVMH", "prix_achat": 458.45, "quantite": 1}
@@ -694,8 +636,8 @@ def generer_rapport():
 # ==============================================================================
 # MODE ALERTE — message court, uniquement sur signaux urgents
 # Critères d'envoi :
-#   - Achat urgent  : RSI ≤ 38 ET conviction ≥ 7  (signal fort confirmé)
-#   - Vente urgente : RSI ≥ 75 ET conviction ≤ 3  (surachat convergent)
+#   - Achat urgent  : RSI <= 38 ET conviction >= 7  (signal fort confirmé)
+#   - Vente urgente : RSI >= 75 ET conviction <= 3  (surachat convergent)
 # Aucun message envoyé si aucun critère n'est atteint.
 # ==============================================================================
 def generer_alertes():
