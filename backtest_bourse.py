@@ -5,7 +5,7 @@ Teste si la stratégie Random Forest + conviction surperforme un simple
 investissement Buy & Hold sur 4 ans, sans biais d'anticipation (look-ahead).
 
 Usage :
-  python backtest_bourse.py                 → tous les actifs
+  python backtest_bourse.py                     → tous les actifs
   python backtest_bourse.py --ticker MC.PA      → actif unique
   python backtest_bourse.py --periode 2y        → période personnalisée
   python backtest_bourse.py --vider-cache       → force le retéléchargement
@@ -52,14 +52,14 @@ except ImportError:
 # CONFIGURATION — alignée sur screener_pro.py
 # ==============================================================================
 
-# SELECTION STRATÉGIQUE LUXE & SANTÉ (Aligné avec screener_pro.py)
 TICKERS_BACKTEST = {
-    "MC.PA":    "LVMH",
-    "KER.PA":   "Kering",
-    "RMS.PA":   "Hermès",
-    "OR.PA":    "L'Oréal",
-    "EL.PA":    "EssilorLuxottica",
-    "SAN.PA":   "Sanofi"
+    "MC.PA":   "LVMH",
+    "TTE.PA":  "TotalEnergies",
+    "OR.PA":   "L'Oréal",
+    "SAN.PA":  "Sanofi",
+    "AI.PA":   "Air Liquide",
+    "SU.PA":   "Schneider Elec",
+    "WPEA.PA": "ETF MSCI World",
 }
 
 PERIODE        = "4y"   # Historique (modifiable via --periode)
@@ -294,7 +294,7 @@ def evaluer_modele_tscv(df_clean: pd.DataFrame, n_splits: int = 5) -> dict:
             continue
 
         model = RandomForestClassifier(n_estimators=50, max_depth=5,
-                                       random_state=42, n_jobs=-1)
+                                        random_state=42, n_jobs=-1)
         model.fit(X_train, y_train)
         acc = accuracy_score(y_test, model.predict(X_test)) * 100
         scores.append(acc)
@@ -361,7 +361,16 @@ def walk_forward_signaux(df_clean: pd.DataFrame) -> pd.DataFrame:
         obv_bull  = df_out.get("OBV_Bull", pd.Series(0, index=df_out.index)).values,
     )
 
-    return df_out[["Close", "RSI", "prob_up", "conviction"]].copy()
+    # Régime de marché (proxy local sans look-ahead) : prix au-dessus de sa
+    # propre SMA200 = tendance de fond haussière. On utilise la SMA200 de
+    # l'actif lui-même, déjà calculée à chaque date sans information future.
+    df_out["is_bull"] = (df_out["Close"] > df_out["SMA200"]).astype(bool)
+
+    # ATR conservé pour le trailing stop (variante B)
+    cols = ["Close", "RSI", "prob_up", "conviction", "is_bull"]
+    if "ATR" in df_out.columns:
+        cols.append("ATR")
+    return df_out[cols].copy()
 
 # ==============================================================================
 # SIMULATION DE PORTEFEUILLE
@@ -429,13 +438,33 @@ def appliquer_fiscalite(capital_final: float, capital_initial: float,
     return {"net": capital_final - impot, "impot": impot, "regime": regime}
 
 
-def simuler_oracle(df_sig: pd.DataFrame) -> dict:
+def simuler_oracle(df_sig: pd.DataFrame, options: dict = None) -> dict:
     """
-    Stratégie Oracle : conviction > SEUIL_ACHAT → achat,
-                       conviction < SEUIL_VENTE OU RSI > RSI_SURACHAT → vente.
-    Utilise VectorBT si disponible, simulation pandas sinon.
+    Simule la stratégie avec des VARIANTES activables via `options` :
+
+      options = {
+        "filtre_regime":  False,  # Hypothèse A : ne pas vendre sur RSI>75
+                                  #   si is_bull (marché haussier) ET conviction>=5
+        "trailing_stop":  False,  # Hypothèse B : stop suiveur ATR au lieu de
+                                  #   la sortie binaire conviction/RSI
+        "trailing_mult":  1.5,    # multiplicateur ATR du stop suiveur
+      }
+
+    Sans options (ou toutes à False), reproduit la stratégie de base v13.0 :
+      achat si conviction > SEUIL_ACHAT,
+      vente si conviction < SEUIL_VENTE OU RSI > RSI_SURACHAT.
+
+    Note : VectorBT n'est utilisé que pour la stratégie de base (sans options),
+    car les variantes nécessitent une logique conditionnelle fine jour par jour.
     """
-    if VBT_AVAILABLE:
+    if options is None:
+        options = {}
+    filtre_regime = options.get("filtre_regime", False)
+    trailing_stop = options.get("trailing_stop", False)
+    trailing_mult = options.get("trailing_mult", 1.5)
+    aucune_option = not (filtre_regime or trailing_stop)
+
+    if VBT_AVAILABLE and aucune_option:
         entries = df_sig["conviction"] > SEUIL_ACHAT
         exits   = (df_sig["conviction"] < SEUIL_VENTE) | (df_sig["RSI"] > RSI_SURACHAT)
         pf = vbt.Portfolio.from_signals(
@@ -443,56 +472,86 @@ def simuler_oracle(df_sig: pd.DataFrame) -> dict:
             init_cash=CAPITAL_INIT, freq="1D"
         )
         stats = pf.stats()
+        metr  = metriques_avancees(pf.value())
         return {
             "capital_final":    CAPITAL_INIT * (1 + pf.total_return()),
             "rendement_total":  pf.total_return() * 100,
             "drawdown_max":     pf.max_drawdown() * 100,
             "win_rate":         float(stats.get("Win Rate [%]", 0)),
             "nb_trades":        int(pf.trades.count()),
+            "frais_totaux":     0.0,
+            "sharpe":           metr["sharpe"],
+            "sortino":          metr["sortino"],
+            "volatilite":       metr["volatilite"],
+            "duree_moy":        0.0,
             "courbe":           pf.value(),
             "trades":           [],
         }
 
-    # ── Simulation pandas (fallback) ─────────────────────────────────────────
+    # ── Simulation pandas (gère les variantes) ───────────────────────────────
     capital      = CAPITAL_INIT
     en_position  = False
     nb_actions   = 0.0
     prix_entree  = 0.0
     date_entree  = None
+    stop_suiveur = 0.0     # niveau du trailing stop (variante B)
     trades       = []
     courbe       = []
     frais_totaux = 0.0
+    a_atr        = "ATR" in df_sig.columns
 
     for date, row in df_sig.iterrows():
         prix = row["Close"]
         conv = row["conviction"]
         rsi  = row["RSI"]
+        bull = bool(row.get("is_bull", False))
+        atr  = row["ATR"] if a_atr else prix * 0.02  # fallback ATR ~2%
 
+        # ── ENTRÉE ───────────────────────────────────────────────────────────
         if not en_position and conv > SEUIL_ACHAT:
-            # Frais à l'achat : on prélève FRAIS_TRANSACTION sur le capital
             frais = capital * FRAIS_TRANSACTION
             frais_totaux += frais
-            capital_net = capital - frais
-            nb_actions  = capital_net / prix
+            nb_actions  = (capital - frais) / prix
             prix_entree = prix
             date_entree = date
             en_position = True
+            stop_suiveur = prix - trailing_mult * atr   # init stop suiveur
 
-        elif en_position and (conv < SEUIL_VENTE or rsi > RSI_SURACHAT):
-            # Frais à la vente : on prélève FRAIS_TRANSACTION sur le produit
-            brut  = nb_actions * prix
-            frais = brut * FRAIS_TRANSACTION
-            frais_totaux += frais
-            capital = brut - frais
-            gain_pct = (prix - prix_entree) / prix_entree * 100
-            trades.append((date_entree, prix_entree, date, prix, gain_pct))
-            nb_actions  = 0.0
-            en_position = False
+        # ── GESTION DE POSITION ──────────────────────────────────────────────
+        elif en_position:
+            vendre = False
+
+            if trailing_stop:
+                # Variante B : le stop monte avec le prix, ne descend jamais
+                stop_suiveur = max(stop_suiveur, prix - trailing_mult * atr)
+                # Sortie si le prix casse le stop suiveur
+                if prix <= stop_suiveur:
+                    vendre = True
+                # Sortie aussi si conviction s'effondre (sécurité)
+                elif conv < SEUIL_VENTE:
+                    vendre = True
+            else:
+                # Logique binaire de base
+                signal_sortie = (conv < SEUIL_VENTE) or (rsi > RSI_SURACHAT)
+                # Variante A : ignorer la sortie RSI>75 si marché haussier + conviction OK
+                if filtre_regime and rsi > RSI_SURACHAT and bull and conv >= 5:
+                    signal_sortie = (conv < SEUIL_VENTE)  # on ne garde que la sortie conviction
+                vendre = signal_sortie
+
+            if vendre:
+                brut  = nb_actions * prix
+                frais = brut * FRAIS_TRANSACTION
+                frais_totaux += frais
+                capital = brut - frais
+                trades.append((date_entree, prix_entree, date, prix,
+                               (prix - prix_entree) / prix_entree * 100))
+                nb_actions  = 0.0
+                en_position = False
 
         valeur = nb_actions * prix if en_position else capital
         courbe.append(valeur)
 
-    # Fermer la position ouverte à la dernière date (avec frais de vente)
+    # Clôture finale
     if en_position:
         prix_fin = df_sig["Close"].iloc[-1]
         brut     = nb_actions * prix_fin
@@ -734,8 +793,79 @@ def backtester_actif(symbol: str, nom: str, periode: str = PERIODE) -> None:
     tracer_courbes(nom, res_ml, res_bh)
 
 
-if __name__ == "__main__":
-    periode = PERIODE
+def comparer_variantes(symbol: str, nom: str, periode: str = "4y",
+                       split_ratio: float = 0.5) -> dict:
+    """
+    PHASE 3 — Compare rigoureusement les variantes de stratégie avec
+    split temporel verrouillé (anti-curve-fitting).
+
+    Les données sont scindées en deux :
+      - ENTRAÎNEMENT (première moitié) : exploration, on regarde les résultats
+      - TEST (seconde moitié) : validation finale, regardée une seule fois
+
+    Variantes comparées :
+      - BASE       : stratégie v13.0 (sortie binaire conviction/RSI)
+      - +RÉGIME    : ne vend pas sur RSI>75 si marché haussier (hypothèse A)
+      - +TRAILING  : stop suiveur ATR au lieu de la sortie binaire (hypothèse B)
+      - +RÉGIME+TR : combinaison des deux
+
+    Référence : Buy & Hold sur la même période.
+    """
+    print(f"\n{'━' * 70}")
+    print(f"  COMPARAISON DE VARIANTES — {nom} ({symbol})")
+    print(f"{'━' * 70}")
+
+    df_raw = telecharger_avec_cache(symbol, periode=periode)
+    if df_raw.empty or len(df_raw) < MIN_TRAIN_JOURS + 150:
+        print(f"  ❌ Données insuffisantes pour {symbol}")
+        return {}
+
+    df = calculer_indicateurs(df_raw)
+    df_clean = df.dropna(subset=FEATURES + ["Target"]).copy()
+    df_sig = walk_forward_signaux(df_clean)
+    if len(df_sig) < 100:
+        print(f"  ❌ Trop peu de signaux")
+        return {}
+
+    # Split temporel
+    n = len(df_sig)
+    i_split = int(n * split_ratio)
+    df_train = df_sig.iloc[:i_split]
+    df_test  = df_sig.iloc[i_split:]
+
+    variantes = {
+        "BASE":         {},
+        "+REGIME":      {"filtre_regime": True},
+        "+TRAILING":    {"trailing_stop": True},
+        "+REGIME+TR":   {"filtre_regime": True, "trailing_stop": True},
+    }
+
+    def _bloc(df_periode, label):
+        print(f"\n  ── {label} : {df_periode.index[0].date()} → {df_periode.index[-1].date()} "
+              f"({len(df_periode)} séances) ──")
+        bh = simuler_buy_hold(df_periode)
+        print(f"  {'Variante':<14} {'Rdt':>8} {'DD max':>9} {'Sharpe':>8} "
+              f"{'Sortino':>8} {'Trades':>7}")
+        print(f"  {'-'*58}")
+        print(f"  {'Buy & Hold':<14} {bh['rendement_total']:>+7.1f}% "
+              f"{bh['drawdown_max']:>+8.1f}% {bh['sharpe']:>8.2f} {bh['sortino']:>8.2f} {'—':>7}")
+        res = {}
+        for vlabel, opts in variantes.items():
+            r = simuler_oracle(df_periode, opts)
+            res[vlabel] = r
+            print(f"  {vlabel:<14} {r['rendement_total']:>+7.1f}% "
+                  f"{r['drawdown_max']:>+8.1f}% {r['sharpe']:>8.2f} "
+                  f"{r['sortino']:>8.2f} {r['nb_trades']:>7}")
+        res["BH"] = bh
+        return res
+
+    res_train = _bloc(df_train, "ENTRAÎNEMENT (exploration)")
+    res_test  = _bloc(df_test,  "TEST (validation finale — regardé une seule fois)")
+
+    return {"train": res_train, "test": res_test, "nom": nom, "symbol": symbol}
+
+
+
     if "--periode" in sys.argv:
         i = sys.argv.index("--periode")
         periode = sys.argv[i + 1]
@@ -748,6 +878,23 @@ if __name__ == "__main__":
             print(f"🗑️  Cache vidé ({CACHE_DIR}/).")
         else:
             print("🗑️  Aucun cache à vider.")
+
+    # ── Mode comparaison de variantes (Phase 3) ─────────────────────────────
+    if "--variantes" in sys.argv:
+        print("═" * 70)
+        print("  PHASE 3 — Comparaison de variantes avec split train/test")
+        print(f"  Split : 50% entraînement / 50% test  ·  Frais {FRAIS_TRANSACTION*100:.2f}%")
+        print("═" * 70)
+        if "--ticker" in sys.argv:
+            i = sys.argv.index("--ticker")
+            sym = sys.argv[i + 1]
+            comparer_variantes(sym, TICKERS_BACKTEST.get(sym, sym), periode)
+        else:
+            for sym, nom in TICKERS_BACKTEST.items():
+                comparer_variantes(sym, nom, periode)
+        print("\n⚠️  Le jeu de TEST ne doit être regardé qu'une seule fois.")
+        print("   Ne pas re-optimiser après l'avoir vu — sinon curve-fitting.")
+        sys.exit(0)
 
     print("═" * 70)
     print("  Backtest — Système d'analyse vs Buy & Hold vs ETF World")
