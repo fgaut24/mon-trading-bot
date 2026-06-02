@@ -1,517 +1,813 @@
 """
-backtest_bourse.py — Validation Oracle ML v15 vs Buy & Hold
-===========================================================
-Teste si la stratégie Random Forest + Money Management surperforme
-un simple investissement Buy & Hold sur 4 ans, sans biais d'anticipation.
+Systeme d'analyse multi-couches du CAC 40 et des ETF PEA
+=========================================================
+Outil d'AIDE A LA DECISION et de VEILLE. Il produit un rapport quotidien
+combinant analyse technique, intelligence artificielle, fondamentale et
+macroeconomique, envoye sur Telegram.
 
-Nouveautés v15 :
-- Univers stratégique Luxe & Santé
-- Money Management (1% de risque par trade basé sur l'ATR)
-- Stop Suiveur dynamique (Trailing Stop)
-- Filtre de Régime (Ignore les ventes surachetées en Bull Market S&P 500)
+AVERTISSEMENT IMPORTANT :
+Ce systeme N'EXECUTE AUCUN ORDRE de bourse. Il ne passe ni achat ni vente.
+Il fournit de l'INFORMATION et des SIGNAUX D'ANALYSE, jamais des instructions
+a executer automatiquement. Toute decision d'investissement releve de
+l'utilisateur seul. Les niveaux affiches (entree, objectif, stop) sont des
+reperes techniques indicatifs, en aucun cas un conseil en investissement.
 
-Usage :
-  python backtest_bourse.py                 → tous les actifs
-  python backtest_bourse.py --ticker MC.PA      → actif unique
-  python backtest_bourse.py --periode 2y        → période personnalisée
-  python backtest_bourse.py --vider-cache       → force le retéléchargement
+Les performances passees ne prejugent pas des resultats futurs.
 """
 
-import sys
 import os
-import time
-import warnings
+import sys
+import json
 import datetime
 import numpy as np
 import pandas as pd
+import requests
 import yfinance as yf
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import accuracy_score
+from pathlib import Path
 
-warnings.filterwarnings("ignore")
+# Support optionnel d'un fichier .env pour l'exécution locale (MacBook Air).
+# Créez un fichier .env à la racine avec TELEGRAM_TOKEN et TELEGRAM_CHAT_ID,
+# puis : pip install python-dotenv
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # Sans python-dotenv, os.environ.get() fonctionne via les variables shell
 
 try:
-    import matplotlib.pyplot as plt
-    MPL_AVAILABLE = True
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.metrics import accuracy_score
+    ML_AVAILABLE = True
 except ImportError:
-    MPL_AVAILABLE = False
+    ML_AVAILABLE = False
 
 # ==============================================================================
-# CONFIGURATION ET MONEY MANAGEMENT (Alignés sur screener_pro.py v15)
+# CONFIGURATION
 # ==============================================================================
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "VOTRE_TOKEN_DE_SECOURS")
+CHAT_ID        = os.environ.get("TELEGRAM_CHAT_ID", "VOTRE_CHAT_ID_DE_SECOURS")
+HISTORY_FILE   = Path("predictions_history.json")
 
-# SELECTION STRATÉGIQUE LUXE & SANTÉ
-TICKERS_BACKTEST = {
+# ==============================================================================
+# UNIVERS DE SURVEILLANCE — CAC 40 + ETF PEA
+# Composition officielle Euronext (révisée trimestriellement).
+# Dernière mise à jour : décembre 2025 (Eiffage entre, Edenred sort).
+# Si un ticker ne renvoie pas de données yfinance, il est silencieusement ignoré.
+# ==============================================================================
+CAC_40 = {
+    # Luxe & consommation premium
     "MC.PA":    "LVMH",
-    "KER.PA":   "Kering",
     "RMS.PA":   "Hermès",
-    "OR.PA":    "L'Oréal",
+    "OR.PA":    "L'Oreal",
+    "KER.PA":   "Kering",
     "EL.PA":    "EssilorLuxottica",
-    "SAN.PA":   "Sanofi"
+    # Énergie
+    "TTE.PA":   "TotalEnergies",
+    "ENGI.PA":  "Engie",
+    # Industrie, aéro, défense
+    "AIR.PA":   "Airbus",
+    "SAF.PA":   "Safran",
+    "HO.PA":    "Thales",
+    "DG.PA":    "Vinci",
+    "LR.PA":    "Legrand",
+    "SU.PA":    "Schneider Elec",
+    "SGO.PA":   "Saint-Gobain",
+    "ALO.PA":   "Alstom",
+    "FGR.PA":   "Eiffage",
+    # Automobile & matériaux
+    "RNO.PA":   "Renault",
+    "STLAM.MI": "Stellantis",
+    "MT.AS":    "ArcelorMittal",
+    "ML.PA":    "Michelin",
+    "STM.PA":   "STMicro",
+    # Banque & assurance
+    "BNP.PA":   "BNP Paribas",
+    "ACA.PA":   "Crédit Agricole",
+    "GLE.PA":   "Soc. Générale",
+    "CS.PA":    "AXA",
+    # Santé
+    "SAN.PA":   "Sanofi",
+    "AI.PA":    "Air Liquide",
+    "BIM.PA":   "bioMérieux",
+    # Services & utilities
+    "VIE.PA":   "Veolia",
+    "ORA.PA":   "Orange",
+    "EN.PA":    "Bouygues",
+    "URW.PA":   "Unibail",
+    # Tech & médias
+    "CAP.PA":   "Capgemini",
+    "DSY.PA":   "Dassault Sys.",
+    "PUB.PA":   "Publicis",
+    "WLN.PA":   "Worldline",
+    # Consommation courante
+    "BN.PA":    "Danone",
+    "CA.PA":    "Carrefour",
+    "RI.PA":    "Pernod Ricard",
+    "VIV.PA":   "Vivendi",
 }
 
-PERIODE         = "4y"   
-MIN_TRAIN_JOURS = 252    
-RETRAIN_FREQ    = 20     
-CAPITAL_INIT    = 10_000.0
+ETF_PEA = {
+    # Indices larges — éligibles PEA via réplication synthétique
+    "WPEA.PA":  "ETF MSCI World",
+    "CW8.PA":   "ETF Monde CW8",
+    "PANX.PA":  "ETF Nasdaq-100",
+    "PSP5.PA":  "ETF S&P 500",
+    "PAEEM.PA": "ETF Émergents",
+    "MEUD.PA":  "ETF Europe 600",
+    "CACC.PA":  "ETF CAC 40",
+}
 
-# Paramètres de gestion du risque
-RISQUE_PAR_TRADE = 0.01  # 1% du capital maximum à perdre par transaction
+TICKERS = {**CAC_40, **ETF_PEA}   # 47 actifs au total
 
-# Seuils de stratégie
-SEUIL_ACHAT    = 6    
-SEUIL_VENTE    = 4    
-RSI_SURACHAT   = 70   
-
-# Frais & fiscalité
-FRAIS_TRANSACTION   = 0.0015   
-TAUX_PRELEV_SOCIAUX = 0.172  
-TAUX_FLAT_TAX       = 0.30   
-
-JOURS_BOURSE_AN  = 252        
-TAUX_SANS_RISQUE = 0.03      
-
-# ETF de référence
-ETF_REFERENCE = "CW8.PA"
-ETF_REFERENCE_NOM = "ETF MSCI World (CW8)"
-
-CACHE_DIR = "cache"
-CACHE_VALIDITE_HEURES = 12   
-DELAI_ENTRE_REQUETES  = 2.0  
-MAX_REESSAIS          = 3    
-
-FEATURES = ["RSI", "MACD_Hist", "ATR", "Price_52W_Pct", "SMA50_vs_SMA200", "BB_Width", "Var_1M"]
+portefeuille = {
+    "MC.PA": {"nom": "LVMH", "prix_achat": 458.45, "quantite": 1}
+}
 
 # ==============================================================================
-# CACHE LOCAL DES DONNÉES
+# FORMATAGE MARKDOWNV2
 # ==============================================================================
-def _chemin_cache(symbol: str) -> str:
-    nom = symbol.replace(".", "_").replace("^", "INDEX_")
-    return os.path.join(CACHE_DIR, f"{nom}.csv")
+_MD2_SPECIAL = set(r"_*[]()~`>#+-=|{}.!")
 
-def _cache_valide(chemin: str) -> bool:
-    if not os.path.exists(chemin): return False
-    age_heures = (time.time() - os.path.getmtime(chemin)) / 3600
-    return age_heures < CACHE_VALIDITE_HEURES
+def esc(text):
+    return "".join(f"\\{c}" if c in _MD2_SPECIAL else c for c in str(text))
 
-def telecharger_avec_cache(symbol: str, periode: str = "5y", start=None, end=None) -> pd.DataFrame:
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    chemin = _chemin_cache(symbol)
+def bold(text):
+    return f"*{esc(text)}*"
 
-    def _filtrer(df):
-        if start is None or end is None or df.empty: return df
-        if not isinstance(df.index, pd.DatetimeIndex):
-            df.index = pd.to_datetime(df.index, utc=True, errors="coerce")
-        ts_start, ts_end = pd.Timestamp(start), pd.Timestamp(end)
-        tz = getattr(df.index, "tz", None)
-        if tz is not None:
-            if ts_start.tz is None: ts_start = ts_start.tz_localize(tz)
-            if ts_end.tz   is None: ts_end   = ts_end.tz_localize(tz)
+# ==============================================================================
+# ENVOI TELEGRAM (supporte les messages > 4 096 car. en les découpant)
+# ==============================================================================
+def envoyer_telegram(texte, chat_id, token):
+    """Envoie un ou plusieurs messages Telegram si le texte dépasse 4 096 car."""
+    LIMIT = 4000  # marge de sécurité sous la limite officielle
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    blocs = []
+
+    while len(texte) > LIMIT:
+        # Coupe au dernier saut de ligne avant la limite
+        coupe = texte.rfind("\n", 0, LIMIT)
+        if coupe == -1:
+            coupe = LIMIT
+        blocs.append(texte[:coupe])
+        texte = texte[coupe:].lstrip("\n")
+    blocs.append(texte)
+
+    for i, bloc in enumerate(blocs, 1):
+        payload = {"chat_id": chat_id, "text": bloc, "parse_mode": "MarkdownV2"}
+        r = requests.post(url, json=payload)
+        if not r.ok:
+            print(f"Échec message {i}/{len(blocs)} ({r.status_code}) : {r.text}")
         else:
-            if ts_start.tz is not None: ts_start = ts_start.tz_localize(None)
-            if ts_end.tz   is not None: ts_end   = ts_end.tz_localize(None)
-        return df.loc[(df.index >= ts_start) & (df.index <= ts_end)]
-
-    if _cache_valide(chemin):
-        try:
-            df = pd.read_csv(chemin, index_col=0)
-            df.index = pd.to_datetime(df.index, utc=True, errors="coerce")
-            df = df[df.index.notna()]
-            if not df.empty:
-                return _filtrer(df)
-        except Exception: pass
-
-    for tentative in range(1, MAX_REESSAIS + 1):
-        try:
-            time.sleep(DELAI_ENTRE_REQUETES)
-            df = yf.Ticker(symbol).history(period=periode)
-            if not df.empty:
-                df.to_csv(chemin)
-                return _filtrer(df)
-        except Exception: pass
-        if tentative < MAX_REESSAIS:
-            time.sleep(DELAI_ENTRE_REQUETES * (tentative + 1) * 2)
-
-    return pd.DataFrame()
+            print(f"✅ Message {i}/{len(blocs)} envoyé ({len(bloc)} car.)")
 
 # ==============================================================================
-# CALCUL DES INDICATEURS ET CONVICTION
+# CONTEXTE MACROÉCONOMIQUE — VIX & Taux 10 ans US
 # ==============================================================================
-def calculer_indicateurs(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    delta = df["Close"].diff()
-    gain  = delta.where(delta > 0, 0.0).rolling(14).mean()
-    loss  = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
-    df["RSI"] = 100 - (100 / (1 + gain / loss))
+def get_macro_context():
+    """
+    Récupère le VIX (peur du marché) et le taux à 10 ans US (^TNX).
+    Retourne un régime + un modificateur appliqué à toutes les convictions.
+    """
+    try:
+        vix = yf.Ticker("^VIX").history(period="5d")["Close"].iloc[-1]
+        tnx = yf.Ticker("^TNX").history(period="5d")["Close"].iloc[-1]
+        if   vix < 15:  regime, modifier = "🟢 CALME",    0
+        elif vix < 22:  regime, modifier = "🟡 VIGILANCE", 0
+        elif vix < 30:  regime, modifier = "🟠 TENSION",  -1
+        else:           regime, modifier = "🔴 PANIQUE",  -2
+        return {"vix": round(vix, 1), "tnx": round(tnx, 2),
+                "regime": regime, "modifier": modifier}
+    except Exception as e:
+        print(f"Avertissement macro : {e}")
+        return {"vix": None, "tnx": None,
+                "regime": "⚪ NEUTRE (données indispo)", "modifier": 0}
 
-    exp1 = df["Close"].ewm(span=12, adjust=False).mean()
-    exp2 = df["Close"].ewm(span=26, adjust=False).mean()
-    df["MACD"]      = exp1 - exp2
-    df["MACD_Sig"]  = df["MACD"].ewm(span=9, adjust=False).mean()
-    df["MACD_Hist"] = df["MACD"] - df["MACD_Sig"]
+# ==============================================================================
+# AJUSTEMENT FONDAMENTAL — PER & marge opérationnelle
+# ==============================================================================
+def fundamental_adjustment(per, margin, macro_tnx):
+    """
+    Retourne un ajustement (-2 à +2) à appliquer à la conviction technique.
+    Ne s'applique pas aux ETF (per et margin non disponibles).
 
-    df["MA20"]     = df["Close"].rolling(20).mean()
-    df["STD20"]    = df["Close"].rolling(20).std()
-    df["BB_High"]  = df["MA20"] + df["STD20"] * 2
-    df["BB_Low"]   = df["MA20"] - df["STD20"] * 2
-    df["BB_Width"] = (df["BB_High"] - df["BB_Low"]) / df["MA20"] * 100
+    Logique :
+      - PER bas (<12) = bon point, PER élevé (>30) = mauvais point
+      - Si taux 10 ans US > 4,2 % et PER > 25 : pénalité supplémentaire
+        (l'argent coûte cher, les valorisations élevées sont plus risquées)
+      - Marge opérationnelle > 15 % = bonus, < 3 % = malus
+    """
+    adj = 0
+    if per is not None and isinstance(per, (int, float)) and per > 0:
+        if   per < 12:                 adj += 1
+        elif per > 30:                 adj -= 1
+        if macro_tnx and macro_tnx > 4.2 and per > 25:
+            adj -= 1
+    if margin is not None and isinstance(margin, (int, float)):
+        if   margin > 0.15:            adj += 1
+        elif margin < 0.03:            adj -= 1
+    return max(-2, min(2, adj))
 
-    df["SMA50"]           = df["Close"].rolling(50).mean()
-    df["SMA200"]          = df["Close"].rolling(200).mean()
-    df["SMA50_vs_SMA200"] = (df["SMA50"] - df["SMA200"]) / df["SMA200"] * 100
-
-    hl = df["High"] - df["Low"]
-    hc = (df["High"] - df["Close"].shift()).abs()
-    lc = (df["Low"]  - df["Close"].shift()).abs()
-    df["ATR"] = pd.concat([hl, hc, lc], axis=1).max(axis=1).rolling(14).mean()
-
-    df["H52"] = df["High"].rolling(252).max()
-    df["L52"] = df["Low"].rolling(252).min()
-    r52       = (df["H52"] - df["L52"]).clip(lower=1e-9)
-    df["Price_52W_Pct"] = (df["Close"] - df["L52"]) / r52 * 100
-    df["Var_1M"]        = df["Close"].pct_change(20) * 100
-
-    if "Volume" in df.columns and df["Volume"].sum() > 0:
-        df["OBV"]     = (df["Close"].diff().apply(np.sign) * df["Volume"]).fillna(0).cumsum()
-        df["OBV_SMA"] = df["OBV"].rolling(20).mean()
-        df["OBV_Bull"] = (df["OBV"] > df["OBV_SMA"]).astype(int)
+# ==============================================================================
+# SCORE DE CONVICTION COMPOSITE (0 → 10)
+# ==============================================================================
+def conviction_score(data, macro_modifier=0, macro_tnx=None):
+    """
+    Score de conviction 0-10. Composition :
+      - Technique (RSI, MACD, SMA200, IA, Volume OBV) : 0-10 pts
+      - Ajustement fondamental (PER, marges) : -2 à +2 (si action)
+      - Modificateur macro (VIX) : -2 à 0
+    Clampé entre 0 et 10.
+    """
+    score = 0
+    rsi = data["rsi"]
+    if   rsi <= 35: score += 3
+    elif rsi <= 45: score += 2
+    elif rsi <= 55: score += 1
+    if data["macd_trend"] == "🍏": score += 2
+    if data["sma_trend"]  == "↗️": score += 2
+    if data.get("ml_ok"):
+        if   data["prob_up"] > 55: score += 2
+        elif data["prob_up"] >= 45: score += 1
     else:
-        df["OBV_Bull"] = 0
+        score += 1
+    if data["vol_trend"] == "📈": score += 1
 
-    df["Target"] = (df["Close"].shift(-5) > df["Close"]).astype(int)
-    return df
+    # Ajustement fondamental (actions uniquement — pour les ETF, per/margin sont None)
+    fonda_adj = fundamental_adjustment(data.get("per"), data.get("margin"), macro_tnx)
+    score += fonda_adj
 
-def conviction_vectorisee(rsi, macd_bull, sma_bull, prob_up, obv_bull) -> np.ndarray:
-    s  = np.zeros(len(rsi))
-    s += np.where(rsi <= 35, 3, np.where(rsi <= 45, 2, np.where(rsi <= 55, 1, 0)))
-    s += np.where(macd_bull, 2, 0)
-    s += np.where(sma_bull, 2, 0)
-    s += np.where(prob_up > 55, 2, np.where(prob_up >= 45, 1, 0))
-    s += np.where(obv_bull, 1, 0)
-    return s
+    # Modificateur macro global
+    score += macro_modifier
+
+    return max(0, min(10, score))
+
+def score_label(score):
+    if   score >= 8: return "🟢🟢 Fort"
+    elif score >= 6: return "🟢 Positif"
+    elif score >= 4: return "⚪ Neutre"
+    elif score >= 2: return "🟡 Faible"
+    else:            return "🔴 Négatif"
+
+def score_emoji(score):
+    if   score >= 8: return "🟢🟢"
+    elif score >= 6: return "🟢"
+    elif score >= 4: return "⚪"
+    elif score >= 2: return "🟡"
+    else:            return "🔴"
 
 # ==============================================================================
-# WALK-FORWARD ML ET CONTEXTE MACROÉCONOMIQUE
+# INTERPRÉTATION PÉDAGOGIQUE
 # ==============================================================================
-def walk_forward_signaux(df_clean: pd.DataFrame) -> pd.DataFrame:
-    n       = len(df_clean)
-    probs   = np.full(n, np.nan)
-    model   = None
+def nom_court(name):
+    return name.strip()
 
-    for i in range(MIN_TRAIN_JOURS, n):
-        if (i - MIN_TRAIN_JOURS) % RETRAIN_FREQ == 0:
-            fin_train = max(0, i - 5)
-            X_tr = df_clean[FEATURES].iloc[:fin_train]
-            y_tr = df_clean["Target"].iloc[:fin_train]
-            if y_tr.nunique() >= 2 and len(y_tr) > 50:
-                model = RandomForestClassifier(n_estimators=50, max_depth=5, random_state=42, n_jobs=-1)
-                model.fit(X_tr, y_tr)
+def interpreter_rsi(rsi):
+    if   rsi <= 35: return "survente — rebond potentiel"
+    elif rsi <= 45: return "RSI bas — délaissé"
+    elif rsi <= 55: return "RSI neutre"
+    elif rsi <= 65: return "RSI tendu"
+    elif rsi <= 75: return "surachat modéré"
+    else:           return "surachat marqué"
 
-        if model is None: continue
-        classes = list(model.classes_)
-        if 1 not in classes: continue
+def interpreter_ia(data):
+    if not data.get("ml_ok"): return None
+    p = data["prob_up"]
+    if   p >= 70: return f"IA très favorable ({p:.0f}%)"
+    elif p >= 55: return f"IA favorable ({p:.0f}%)"
+    elif p <= 30: return f"IA très défavorable ({p:.0f}%)"
+    elif p <= 45: return f"IA défavorable ({p:.0f}%)"
+    return None
 
-        X_j       = df_clean[FEATURES].iloc[i:i+1].fillna(0)
-        proba     = model.predict_proba(X_j)[0]
-        probs[i]  = proba[classes.index(1)] * 100
+def interpreter_signal(data):
+    parts = [interpreter_rsi(data["rsi"])]
+    parts.append("tendance ↗️" if data["sma_trend"] == "↗️" else "tendance ↘️")
+    ia = interpreter_ia(data)
+    if ia: parts.append(ia)
+    if data["vol_trend"] == "📈": parts.append("volumes ↑")
+    return " · ".join(parts)
 
-    df_out = df_clean.copy()
-    df_out["prob_up"] = probs
-    df_out = df_out.dropna(subset=["prob_up"])
+def verdict_action(data, conv):
+    rsi  = data["rsi"]
+    prix = data["price"]
+    atr  = data["atr"]
+    entree   = round(prix - 0.5 * atr, 2)
+    objectif = round(prix + 2.5 * atr, 2)
+    stop     = round(prix - 1.5 * atr, 2)
 
-    df_out["conviction"] = conviction_vectorisee(
-        rsi       = df_out["RSI"].values,
-        macd_bull = (df_out["MACD"] > df_out["MACD_Sig"]).values,
-        sma_bull  = (df_out["Close"] > df_out["SMA200"]).values,
-        prob_up   = df_out["prob_up"].values,
-        obv_bull  = df_out.get("OBV_Bull", pd.Series(0, index=df_out.index)).values,
+    if rsi <= 35 and conv >= 7:
+        return (f"🟢 ACHETER — signal fort\n"
+                f"   J'entre à {prix:.2f} € ou repli vers {entree:.2f} €\n"
+                f"   Je vise {objectif:.2f} €  ·  Je coupe sous {stop:.2f} €")
+    if rsi <= 35 and conv >= 5:
+        return (f"🟢 ACHETER — signal modéré\n"
+                f"   J'entre si le prix tient au-dessus de {stop:.2f} €\n"
+                f"   Je vise {objectif:.2f} €  ·  Je coupe sous {stop:.2f} €")
+    if rsi <= 35:
+        return (f"👁️ SURVEILLER — survente, signaux mixtes\n"
+                f"   J'attends stabilisation. Je reviens si conviction > 5/10.")
+    if rsi <= 45 and conv >= 7:
+        return (f"🔵 RENFORCER sur repli\n"
+                f"   J'attends un retour vers {entree:.2f} €\n"
+                f"   Je vise {objectif:.2f} €  ·  Je coupe sous {stop:.2f} €")
+    if rsi <= 45 and conv >= 5:
+        return (f"💎 CONSERVER — profil intéressant\n"
+                f"   Je renforce si repli vers {entree:.2f} €\n"
+                f"   Je coupe sous {stop:.2f} €")
+    if rsi >= 70 and conv <= 3:
+        return (f"🔴 VENDRE — convergence baissière\n"
+                f"   Je vends maintenant. Je reviens si RSI < 50.")
+    if rsi >= 70 and conv <= 5:
+        return (f"🟠 ALLÉGER — surachat confirmé\n"
+                f"   Je réduis 30 à 50 % de ma position.\n"
+                f"   Si RSI < 65 demain je conserve le reste, sinon je réduis encore.")
+    if rsi >= 70:
+        return (f"🟡 ATTENTION — surachat, tendance forte\n"
+                f"   Je ne renforce pas. Stop à {stop:.2f} €")
+    if rsi >= 65:
+        return (f"🟡 ATTENDRE — zone tendue\n"
+                f"   Je n'achète pas. Je reviens si RSI < 60.")
+    if conv >= 6:
+        return (f"💎 CONSERVER — profil favorable\n"
+                f"   Je renforce sur repli vers {entree:.2f} €\n"
+                f"   Je coupe sous {stop:.2f} €")
+    if conv >= 4:
+        return "💎 CONSERVER — je ne change rien pour l'instant"
+    return (f"🟡 PRUDENCE — signaux faibles\n"
+            f"   J'envisage d'alléger si position importante.")
+
+def generer_resume_executif(data_actifs, macro_mod=0, macro_tnx=None):
+    sorted_items = sorted(data_actifs.items(),
+                          key=lambda x: conviction_score(x[1], macro_mod, macro_tnx), reverse=True)
+    lines = []
+    achats   = [(s,d) for s,d in sorted_items if d["rsi"] <= 38]
+    ventes   = [(s,d) for s,d in sorted_items if d["rsi"] >= 70]
+    top_conv = [(s,d) for s,d in sorted_items
+                if conviction_score(d, macro_mod, macro_tnx) >= 7 and d["rsi"] < 70]
+    if achats:
+        noms = " et ".join(d["name"] for _,d in achats[:2])
+        lines.append(f"⭐ {noms} en zone de survente — entrée potentielle")
+    if top_conv:
+        noms = ", ".join(d["name"] for _,d in top_conv[:3])
+        lines.append(f"📌 Conviction maximale : {noms}")
+    if ventes:
+        noms = ", ".join(d["name"] for _,d in ventes[:3])
+        lines.append(f"⚠️ Surachat : {noms}")
+    if not lines:
+        lines.append("⚪ Aucun signal fort — marché en attente")
+    non_gold = list(sorted_items)
+    if non_gold:
+        _, best = max(non_gold, key=lambda x: x[1]["momentum_6m"])
+        lines.append(f"📈 Meilleur momentum 6 mois : {best['name']} ({best['momentum_6m']:+.1f}%)")
+    return lines
+
+# ==============================================================================
+# PERSISTANCE ET VALIDATION DES PRÉDICTIONS IA
+# ==============================================================================
+def charger_historique():
+    if HISTORY_FILE.exists():
+        try:
+            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            print(f"Avertissement historique : {e}")
+    return []
+
+def sauvegarder_historique(historique, data_actifs):
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+    historique = [e for e in historique if e["date"] != today]
+    entry = {
+        "date": today,
+        "assets": {
+            s: {"price": round(d["price"], 4), "prob_up": round(d["prob_up"], 1)}
+            for s, d in data_actifs.items() if d.get("ml_ok")
+        }
+    }
+    historique.append(entry)
+    historique = historique[-90:]
+    try:
+        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(historique, f, ensure_ascii=False, indent=2)
+        print(f"✅ Historique : {len(entry['assets'])} prédictions ({today})")
+    except IOError as e:
+        print(f"Erreur historique : {e}")
+    return historique
+
+def valider_predictions(data_actifs, historique):
+    today  = datetime.datetime.now().date()
+    cutoff = today - datetime.timedelta(days=5)
+    candidats = [e for e in historique
+                 if datetime.datetime.strptime(e["date"], "%Y-%m-%d").date() <= cutoff]
+    if not candidats: return None
+    ref = max(candidats, key=lambda e: e["date"])
+    ref_date = datetime.datetime.strptime(ref["date"], "%Y-%m-%d").date().strftime("%d/%m/%Y")
+    total = correct = 0
+    details = []
+    for symbol, pred in ref["assets"].items():
+        if symbol not in data_actifs: continue
+        prix_pred   = pred["price"]
+        prix_actuel = data_actifs[symbol]["price"]
+        dir_predite = pred["prob_up"] > 50
+        dir_reelle  = prix_actuel > prix_pred
+        variation   = (prix_actuel - prix_pred) / prix_pred * 100
+        ok = (dir_predite == dir_reelle)
+        total += 1
+        if ok: correct += 1
+        details.append({"name": data_actifs[symbol]["name"], "prob_up": pred["prob_up"],
+                         "variation": variation, "ok": ok})
+    if total == 0: return None
+    return {"ref_date": ref_date, "total": total, "correct": correct,
+            "accuracy": correct / total * 100, "details": details}
+
+# ==============================================================================
+# CALCUL DES INDICATEURS ET PRÉDICTION ML
+# ==============================================================================
+def fetch_indicators_and_predict(ticker_symbol):
+    try:
+        ticker = yf.Ticker(ticker_symbol)
+        df = ticker.history(period="2y")
+        if df.empty or len(df) < 200:
+            return None
+
+        delta = df['Close'].diff()
+        gain  = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss  = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs    = gain / loss
+        df['RSI'] = 100 - (100 / (1 + rs))
+
+        exp1 = df['Close'].ewm(span=12, adjust=False).mean()
+        exp2 = df['Close'].ewm(span=26, adjust=False).mean()
+        df['MACD']      = exp1 - exp2
+        df['Signal']    = df['MACD'].ewm(span=9, adjust=False).mean()
+        df['MACD_Hist'] = df['MACD'] - df['Signal']
+
+        df['MA20']    = df['Close'].rolling(window=20).mean()
+        df['STD20']   = df['Close'].rolling(window=20).std()
+        df['BB_High'] = df['MA20'] + (df['STD20'] * 2)
+        df['BB_Low']  = df['MA20'] - (df['STD20'] * 2)
+        df['SMA200']  = df['Close'].rolling(window=200).mean()
+
+        high_low   = df['High'] - df['Low']
+        high_close = np.abs(df['High'] - df['Close'].shift())
+        low_close  = np.abs(df['Low']  - df['Close'].shift())
+        df['ATR']    = np.max(pd.concat([high_low, high_close, low_close], axis=1),
+                              axis=1).rolling(14).mean()
+        df['Var_6M'] = df['Close'].pct_change(periods=126) * 100
+
+        df['High_52W'] = df['High'].rolling(window=252).max()
+        df['Low_52W']  = df['Low'].rolling(window=252).min()
+        range_52w = (df['High_52W'] - df['Low_52W']).clip(lower=1e-9)
+        df['Price_52W_Pct']   = (df['Close'] - df['Low_52W']) / range_52w * 100
+        df['SMA50']           = df['Close'].rolling(window=50).mean()
+        df['SMA50_vs_SMA200'] = (df['SMA50'] - df['SMA200']) / df['SMA200'] * 100
+        df['BB_Width']        = (df['BB_High'] - df['BB_Low']) / df['MA20'] * 100
+        df['Var_1M']          = df['Close'].pct_change(periods=20) * 100
+
+        if 'Volume' in df.columns and df['Volume'].sum() > 0:
+            df['OBV']     = (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
+            df['OBV_SMA'] = df['OBV'].rolling(window=20).mean()
+            vol_trend = "📈" if df['OBV'].iloc[-1] > df['OBV_SMA'].iloc[-1] else "📉"
+        else:
+            vol_trend = "—"
+
+        prob_up = backtest_score = 0.0
+        ml_ok = False
+
+        if ML_AVAILABLE:
+            df['Target'] = (df['Close'].shift(-5) > df['Close']).astype(int)
+            features = ['RSI', 'MACD_Hist', 'ATR',
+                        'Price_52W_Pct', 'SMA50_vs_SMA200', 'BB_Width', 'Var_1M']
+            ml_df = df.dropna(subset=features + ['Target']).copy()
+            if len(ml_df) > 100:
+                X = ml_df[features]; y = ml_df['Target']
+                split_idx = int(len(X) * 0.8)
+                X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
+                y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
+                if y_train.nunique() >= 2:
+                    model = RandomForestClassifier(n_estimators=50, max_depth=5, random_state=42)
+                    model.fit(X_train, y_train)
+                    if len(X_test) > 0:
+                        backtest_score = accuracy_score(y_test, model.predict(X_test)) * 100
+                    proba   = model.predict_proba(df[features].iloc[-1:].fillna(0))[0]
+                    classes = list(model.classes_)
+                    if 1 in classes:
+                        prob_up = proba[classes.index(1)] * 100
+                        ml_ok   = True
+
+        last_row = df.iloc[-1]; prev_row = df.iloc[-2]
+        info = ticker.info
+        per_raw = info.get('trailingPE') or info.get('forwardPE')
+        current_price = last_row['Close']
+
+        yield_raw = info.get('dividendYield')
+        if yield_raw is not None and yield_raw != 0:
+            div_pct = yield_raw * 100 if yield_raw < 1 else yield_raw
+            div_str = f"{div_pct:.1f}%"
+        elif info.get('dividendRate') is not None and current_price > 0:
+            div_str = f"{(info['dividendRate'] / current_price) * 100:.1f}%"
+        else:
+            div_str = "—"
+
+        # Marge opérationnelle (pour analyse fondamentale)
+        margin = info.get("operatingMargins")
+
+        return {
+            "price":       current_price,
+            "change":      ((current_price - prev_row['Close']) / prev_row['Close']) * 100,
+            "margin":      margin,
+            "rsi":         last_row['RSI'],
+            "macd_trend":  "🍏" if last_row['MACD'] > last_row['Signal'] else "🔻",
+            "bb_pos":      ("BB BAS" if current_price <= last_row['BB_Low'] else
+                            "BB HIGH" if current_price >= last_row['BB_High'] else "BB MID"),
+            "bb_low":      last_row['BB_Low'],
+            "bb_high":     last_row['BB_High'],
+            "sma_trend":   "↗️" if current_price > last_row['SMA200'] else "↘️",
+            "atr":         last_row['ATR'],
+            "momentum_6m": last_row['Var_6M'],
+            "per":         per_raw,
+            "dividend":    div_str,
+            "vol_trend":   vol_trend,
+            "prob_up":     prob_up,
+            "backtest":    backtest_score,
+            "ml_ok":       ml_ok
+        }
+    except Exception as e:
+        print(f"Erreur sur {ticker_symbol}: {e}")
+        return None
+
+# ==============================================================================
+# GÉNÉRATION DU RAPPORT — 2 MESSAGES
+# Message 1 : résumé exécutif + signaux actionnables + portefeuille
+# Message 2 : tableau de bord complet + validation IA
+# ==============================================================================
+def generer_rapport():
+    SEP = "════════════════════════════════"
+    historique = charger_historique()
+
+    # ── Contexte macroéconomique global ──────────────────────────────────────
+    macro = get_macro_context()
+    macro_mod = macro["modifier"]
+    macro_tnx = macro["tnx"]
+
+    if macro["vix"] is not None:
+        meteo = f"{macro['regime']} (VIX {macro['vix']} · US10Y {macro['tnx']}%)"
+        if   macro_mod == 0:  meteo_note = "Conditions favorables — convictions non pénalisées."
+        elif macro_mod == -1: meteo_note = "Tension de marché — convictions ajustées de -1."
+        else:                 meteo_note = "Panique de marché — convictions ajustées de -2."
+    else:
+        meteo = macro["regime"]
+        meteo_note = "Données macro indisponibles — convictions non ajustées."
+
+    now = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
+
+    # ── Collecte des données ─────────────────────────────────────────────────
+    data_actifs = {}
+    for symbol, name in TICKERS.items():
+        res = fetch_indicators_and_predict(symbol)
+        if res:
+            res["name"] = name
+            data_actifs[symbol] = res
+
+    validation   = valider_predictions(data_actifs, historique)
+    sorted_items = sorted(data_actifs.items(),
+                          key=lambda x: conviction_score(x[1], macro_mod, macro_tnx), reverse=True)
+
+    n_actifs = len(data_actifs)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # MESSAGE 1 : INTELLIGENCE ACTIONNABLE
+    # ══════════════════════════════════════════════════════════════════════════
+    m1  = "📊 " + bold(f"ANALYSE CAC 40 — {now}") + "\n"
+    m1 += esc(f"({n_actifs} valeurs analysées — CAC 40 + ETF PEA)") + "\n"
+    m1 += SEP + "\n"
+    m1 += esc(f"🌡️ {meteo}") + "\n"
+    m1 += esc(f"   {meteo_note}") + "\n\n"
+
+    # Résumé exécutif
+    m1 += bold("CE QU'IL FAUT RETENIR") + "\n"
+    for line in generer_resume_executif(data_actifs, macro_mod, macro_tnx):
+        m1 += esc(f"  {line}") + "\n"
+    m1 += "\n"
+
+    # Top 3 momentum
+    top3 = sorted(data_actifs.items(), key=lambda x: x[1]["momentum_6m"], reverse=True)[:3]
+    top3_txt = "  ·  ".join(f"{d['name']} {d['momentum_6m']:+.1f}%" for _,d in top3)
+    m1 += esc(f"📈 Top élan 6 mois : {top3_txt}") + "\n"
+    m1 += "\n" + SEP + "\n\n"
+
+    # Signaux forts (top 5, RSI < 70)
+    forts = [(s,d) for s,d in sorted_items if conviction_score(d, macro_mod, macro_tnx) >= 6 and d["rsi"] < 70][:5]
+    if forts:
+        m1 += bold("🎯 SIGNAUX FORTS") + "\n"
+        m1 += esc("   Niveaux ATR — signaux techniques, pas un conseil financier.") + "\n\n"
+        for symbol, data in forts:
+            conv     = conviction_score(data, macro_mod, macro_tnx)
+            rsi_flag = " ⭐" if data["rsi"] <= 35 else ""
+            m1 += esc(f"• {data['name']}{rsi_flag}") + "  " + bold(f"{conv}/10") + "\n"
+            m1 += esc(f"  {interpreter_signal(data)}") + "\n"
+            m1 += esc(f"  {verdict_action(data, conv)}") + "\n\n"
+
+    # Alertes surachat (top 3)
+    surachat = [(s,d) for s,d in sorted_items if d["rsi"] >= 70][:3]
+    if surachat:
+        m1 += bold("⚠️ ALERTES SURACHAT") + "\n\n"
+        for symbol, data in surachat:
+            conv = conviction_score(data, macro_mod, macro_tnx)
+            m1 += esc(f"• {data['name']}  RSI {data['rsi']:.0f}  {data['change']:+.1f}% aujourd'hui") + "\n"
+            m1 += esc(f"  {interpreter_signal(data)}") + "\n"
+            m1 += esc(f"  {verdict_action(data, conv)}") + "\n\n"
+
+    m1 += SEP + "\n"
+
+    # Portefeuille
+    m1 += "\n💼 " + bold("MON PORTEFEUILLE") + "\n"
+    total_investi = total_actuel = 0
+    for symbol, pos in portefeuille.items():
+        if symbol in data_actifs:
+            actuel_price = data_actifs[symbol]["price"]
+            val_investie = pos["prix_achat"] * pos["quantite"]
+            val_actuelle = actuel_price * pos["quantite"]
+            pnl_euro     = val_actuelle - val_investie
+            pnl_pct      = (pnl_euro / val_investie) * 100
+            conv         = conviction_score(data_actifs[symbol], macro_mod, macro_tnx)
+            total_investi += val_investie
+            total_actuel  += val_actuelle
+            perf_s = "🟢" if pnl_euro >= 0 else "🔴"
+            m1 += esc(f"  {perf_s} {pos['nom']} ({pos['quantite']} part)") + "\n"
+            m1 += esc(f"     Valeur : {val_actuelle:.0f} € · achat {val_investie:.0f} €") + "\n"
+            m1 += esc(f"     P&L : {pnl_euro:+.2f} € ({pnl_pct:+.1f}%)  · Aujourd'hui : {data_actifs[symbol]['change']:+.1f}%") + "\n"
+            m1 += esc(f"     Signal : {conv}/10 {score_label(conv)} — {interpreter_signal(data_actifs[symbol])}") + "\n\n"
+
+    g_pnl  = total_actuel - total_investi
+    g_pct  = (g_pnl / total_investi * 100) if total_investi > 0 else 0
+    g_symb = "🟢" if g_pnl >= 0 else "🔴"
+    m1 += esc(f"  {g_symb} TOTAL : {total_actuel:.0f} € · investi {total_investi:.0f} € · P&L : {g_pnl:+.2f} € ({g_pct:+.1f}%)") + "\n"
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # MESSAGE 2 : TABLEAU DE BORD COMPLET
+    # ══════════════════════════════════════════════════════════════════════════
+    m2  = "📊 " + bold("TABLEAU DE BORD COMPLET") + "\n"
+    m2 += esc(f"  {n_actifs} valeurs · triées par conviction · ⭐ achat · ⚠️ surachat") + "\n"
+    m2 += SEP + "\n\n"
+
+    for symbol, data in sorted_items:
+        conv   = conviction_score(data, macro_mod, macro_tnx)
+        s_e    = score_emoji(conv)
+        flag_r = " ⭐" if data["rsi"] <= 35 else (" ⚠️" if data["rsi"] >= 70 else "  ")
+        ia_s   = f"IA {data['prob_up']:.0f}%" if data.get("ml_ok") else "IA —"
+        line   = (f"  {s_e} {data['name']:<18}{flag_r}"
+                  f"  {conv}/10"
+                  f"  RSI {data['rsi']:.0f}"
+                  f"  {data['change']:+.1f}%"
+                  f"  {ia_s}")
+        m2 += esc(line) + "\n"
+
+    m2 += "\n" + SEP + "\n"
+
+    # Validation IA (si disponible)
+    if validation:
+        acc   = validation["accuracy"]
+        acc_e = "🟢" if acc >= 60 else ("🔴" if acc < 45 else "⚪")
+        m2 += "\n🔬 " + bold(f"VALIDATION IA — prédictions du {validation['ref_date']}") + "\n"
+        m2 += esc(f"  {validation['correct']}/{validation['total']} directions correctes — {acc:.0f}% {acc_e}") + "\n"
+        sorted_d = sorted(validation["details"], key=lambda x: abs(x["variation"]), reverse=True)
+        best  = next((d for d in sorted_d if d["ok"]),  None)
+        worst = next((d for d in sorted_d if not d["ok"]), None)
+        if best:
+            dir_p = "hausse" if best["prob_up"] > 50 else "baisse"
+            dir_r = "↗️" if best["variation"] >= 0 else "↘️"
+            m2 += esc(f"  ✅ {best['name']} : {dir_p} ({best['prob_up']:.0f}%) → {dir_r} {best['variation']:+.1f}%") + "\n"
+        if worst:
+            dir_p = "hausse" if worst["prob_up"] > 50 else "baisse"
+            dir_r = "↗️" if worst["variation"] >= 0 else "↘️"
+            m2 += esc(f"  ❌ {worst['name']} : {dir_p} ({worst['prob_up']:.0f}%) → {dir_r} {worst['variation']:+.1f}%") + "\n"
+        m2 += "\n" + SEP + "\n"
+
+    m2 += "\n🤖 `RSI · MACD · SMA200 · OBV · IA 7 features · Conviction /10 · Fonda PER+Marge · Macro VIX+US10Y`\n"
+    m2 += esc("⚠️ Systeme d'analyse — n'execute aucun ordre. Reperes indicatifs, pas un conseil financier.")
+
+    # ── Envoi des deux messages ───────────────────────────────────────────────
+    envoyer_telegram(m1, CHAT_ID, TELEGRAM_TOKEN)
+    envoyer_telegram(m2, CHAT_ID, TELEGRAM_TOKEN)
+
+    sauvegarder_historique(historique, data_actifs)
+
+# ==============================================================================
+# MODE ALERTE — message court, uniquement sur signaux urgents
+# Critères d'envoi :
+#   - Achat urgent  : RSI ≤ 38 ET conviction ≥ 7  (signal fort confirmé)
+#   - Vente urgente : RSI ≥ 75 ET conviction ≤ 3  (surachat convergent)
+# Aucun message envoyé si aucun critère n'est atteint.
+# ==============================================================================
+def generer_alertes():
+    macro = get_macro_context()
+    macro_mod = macro["modifier"]
+    macro_tnx = macro["tnx"]
+
+    data_actifs = {}
+    for symbol, name in TICKERS.items():
+        res = fetch_indicators_and_predict(symbol)
+        if res:
+            res["name"] = name
+            data_actifs[symbol] = res
+
+    achats = sorted(
+        [(s, d) for s, d in data_actifs.items()
+         if d["rsi"] <= 38 and conviction_score(d, macro_mod, macro_tnx) >= 7],
+        key=lambda x: conviction_score(x[1], macro_mod, macro_tnx), reverse=True
     )
-    
-    # Intégration de la macro (Régime S&P 500) pour toute la période
-    df_sp500 = telecharger_avec_cache("^GSPC", periode="5y")
-    if not df_sp500.empty:
-        df_sp500["SP500_SMA200"] = df_sp500["Close"].rolling(200).mean()
-        df_sp500["SP500_Bull"] = df_sp500["Close"] > df_sp500["SP500_SMA200"]
-        df_out = df_out.join(df_sp500[["SP500_Bull"]], how="left")
-        df_out["SP500_Bull"] = df_out["SP500_Bull"].ffill().fillna(False)
-    else:
-        df_out["SP500_Bull"] = False
+    ventes = sorted(
+        [(s, d) for s, d in data_actifs.items()
+         if d["rsi"] >= 75 and conviction_score(d, macro_mod, macro_tnx) <= 3],
+        key=lambda x: conviction_score(x[1], macro_mod, macro_tnx)
+    )
 
-    return df_out[["Close", "RSI", "ATR", "prob_up", "conviction", "SP500_Bull"]].copy()
-
-# ==============================================================================
-# SIMULATION DE PORTEFEUILLE V15 (Money Management + Trailing Stop)
-# ==============================================================================
-def metriques_avancees(courbe: pd.Series, trades: list = None) -> dict:
-    rendements = courbe.pct_change().dropna()
-    if len(rendements) < 2 or rendements.std() == 0:
-        return {"sharpe": 0.0, "sortino": 0.0, "volatilite": 0.0, "duree_moy": 0.0}
-
-    rdt_moy_annuel = rendements.mean() * JOURS_BOURSE_AN
-    vol_annuelle   = rendements.std() * np.sqrt(JOURS_BOURSE_AN)
-    sharpe = (rdt_moy_annuel - TAUX_SANS_RISQUE) / vol_annuelle if vol_annuelle > 0 else 0.0
-    rdts_neg = rendements[rendements < 0]
-    downside_vol = rdts_neg.std() * np.sqrt(JOURS_BOURSE_AN) if len(rdts_neg) > 1 else 0.0
-    sortino = (rdt_moy_annuel - TAUX_SANS_RISQUE) / downside_vol if downside_vol > 0 else 0.0
-
-    duree_moy = 0.0
-    if trades:
-        durees = [(t[2] - t[0]).days for t in trades if t[2] and t[0]]
-        duree_moy = np.mean(durees) if durees else 0.0
-
-    return {"sharpe": sharpe, "sortino": sortino, "volatilite": vol_annuelle * 100, "duree_moy": duree_moy}
-
-def appliquer_fiscalite(capital_final: float, capital_initial: float, regime: str = "PEA") -> dict:
-    plus_value = capital_final - capital_initial
-    if plus_value <= 0: return {"net": capital_final, "impot": 0.0, "regime": regime}
-    taux = TAUX_PRELEV_SOCIAUX if regime == "PEA" else TAUX_FLAT_TAX
-    impot = plus_value * taux
-    return {"net": capital_final - impot, "impot": impot, "regime": regime}
-
-def simuler_oracle(df_sig: pd.DataFrame) -> dict:
-    capital      = CAPITAL_INIT
-    cash         = capital
-    en_position  = False
-    nb_actions   = 0
-    prix_entree  = 0.0
-    stop_suiveur = 0.0
-    date_entree  = None
-    trades       = []
-    courbe       = []
-    frais_totaux = 0.0
-
-    for date, row in df_sig.iterrows():
-        prix = row["Close"]
-        conv = row["conviction"]
-        rsi  = row["RSI"]
-        atr  = row["ATR"]
-        is_bull = row["SP500_Bull"]
-
-        if not en_position:
-            if conv >= SEUIL_ACHAT:
-                stop_initial = prix - 1.5 * atr
-                distance_stop = prix - stop_initial
-                
-                if distance_stop > 0:
-                    risque_eur = capital * RISQUE_PAR_TRADE
-                    nb_act_calc = int(risque_eur / distance_stop)
-                    
-                    if nb_act_calc > 0:
-                        montant_brut = nb_act_calc * prix
-                        frais = montant_brut * FRAIS_TRANSACTION
-                        
-                        # Achat partiel du portefeuille (Liquidités conservées)
-                        if (montant_brut + frais) <= cash:
-                            nb_actions = nb_act_calc
-                            cash -= (montant_brut + frais)
-                            frais_totaux += frais
-                            prix_entree = prix
-                            stop_suiveur = stop_initial
-                            date_entree = date
-                            en_position = True
-        else:
-            # 1. Mise à jour du Stop Suiveur dynamique
-            nouveau_stop = prix - 1.5 * atr
-            if nouveau_stop > stop_suiveur:
-                stop_suiveur = nouveau_stop
-                
-            # 2. Conditions de vente
-            touche_stop = prix <= stop_suiveur
-            baisse_conv = conv < SEUIL_VENTE
-            surachat = (rsi > RSI_SURACHAT)
-            
-            # Filtre de Régime : Bloquer la vente surachetée si le SP500 est haussier
-            vendre_surachat = surachat and not (is_bull and conv >= 5)
-
-            if touche_stop or baisse_conv or vendre_surachat:
-                montant_brut = nb_actions * prix
-                frais = montant_brut * FRAIS_TRANSACTION
-                frais_totaux += frais
-                cash += (montant_brut - frais)
-                gain_pct = (prix - prix_entree) / prix_entree * 100
-                motif = "Stop" if touche_stop else ("Surachat" if vendre_surachat else "Signal")
-                trades.append((date_entree, prix_entree, date, prix, gain_pct, motif))
-                nb_actions = 0
-                en_position = False
-
-        valeur_pf = cash + (nb_actions * prix if en_position else 0)
-        capital = valeur_pf
-        courbe.append(valeur_pf)
-
-    if en_position:
-        prix_fin = df_sig["Close"].iloc[-1]
-        brut = nb_actions * prix_fin
-        frais = brut * FRAIS_TRANSACTION
-        frais_totaux += frais
-        cash += (brut - frais)
-        trades.append((date_entree, prix_entree, df_sig.index[-1], prix_fin, (prix_fin - prix_entree) / prix_entree * 100, "Clôture Test"))
-        courbe[-1] = cash
-
-    courbe_s = pd.Series(courbe, index=df_sig.index)
-    peak     = courbe_s.cummax()
-    dd_max   = ((courbe_s - peak) / peak * 100).min()
-    nb_win   = sum(1 for t in trades if t[4] > 0)
-    metr     = metriques_avancees(courbe_s, trades)
-
-    return {
-        "capital_final":    courbe_s.iloc[-1],
-        "rendement_total":  (courbe_s.iloc[-1] / CAPITAL_INIT - 1) * 100,
-        "drawdown_max":     dd_max,
-        "win_rate":         (nb_win / len(trades) * 100) if trades else 0.0,
-        "nb_trades":        len(trades),
-        "frais_totaux":     frais_totaux,
-        "sharpe":           metr["sharpe"],
-        "sortino":          metr["sortino"],
-        "volatilite":       metr["volatilite"],
-        "duree_moy":        metr["duree_moy"],
-        "courbe":           courbe_s,
-        "trades":           trades,
-    }
-
-def simuler_buy_hold(df_sig: pd.DataFrame) -> dict:
-    p0 = df_sig["Close"].iloc[0]
-    pn = df_sig["Close"].iloc[-1]
-    cap_apres_achat = CAPITAL_INIT * (1 - FRAIS_TRANSACTION)
-    nb_actions = cap_apres_achat / p0
-    cap_f = (nb_actions * pn) * (1 - FRAIS_TRANSACTION)
-    courbe = nb_actions * df_sig["Close"]
-    peak = courbe.cummax()
-    dd_max = ((courbe - peak) / peak * 100).min()
-    metr = metriques_avancees(courbe)
-    return {
-        "capital_final":   cap_f,
-        "rendement_total": (cap_f / CAPITAL_INIT - 1) * 100,
-        "drawdown_max":    dd_max,
-        "sharpe":          metr["sharpe"],
-        "sortino":         metr["sortino"],
-        "volatilite":      metr["volatilite"],
-        "courbe":          courbe,
-    }
-
-def simuler_etf_reference(date_debut, date_fin) -> dict:
-    df = telecharger_avec_cache(ETF_REFERENCE, periode="5y", start=date_debut, end=date_fin)
-    if df.empty or len(df) < 30: return None
-    p0, pn = df["Close"].iloc[0], df["Close"].iloc[-1]
-    cap_apres_achat = CAPITAL_INIT * (1 - FRAIS_TRANSACTION)
-    nb = cap_apres_achat / p0
-    cap_f = (nb * pn) * (1 - FRAIS_TRANSACTION)
-    courbe = nb * df["Close"]
-    peak = courbe.cummax()
-    metr = metriques_avancees(courbe)
-    return {
-        "capital_final":   cap_f,
-        "rendement_total": (cap_f / CAPITAL_INIT - 1) * 100,
-        "drawdown_max":    ((courbe - peak) / peak * 100).min(),
-        "sharpe":          metr["sharpe"],
-        "sortino":         metr["sortino"],
-    }
-
-# ==============================================================================
-# AFFICHAGE ET EXÉCUTION
-# ==============================================================================
-def afficher_tableau(nom, res_ml, res_bh, date_debut, date_fin, res_etf=None):
-    annees = (date_fin - date_debut).days / 365.25
-    rend_an_ml = ((1 + res_ml["rendement_total"] / 100) ** (1 / annees) - 1) * 100
-    rend_an_bh = ((1 + res_bh["rendement_total"] / 100) ** (1 / annees) - 1) * 100
-    fisc_ml = appliquer_fiscalite(res_ml["capital_final"], CAPITAL_INIT, "PEA")
-    fisc_bh = appliquer_fiscalite(res_bh["capital_final"], CAPITAL_INIT, "PEA")
-
-    L = 70
-    print(f"\n{'═' * L}")
-    print(f"  {nom}")
-    print(f"  {date_debut.date()} → {date_fin.date()}  ({annees:.1f} ans)")
-    print(f"{'═' * L}")
-    print(f"  {'Métrique':<34} {'Oracle v15':>14} {'Buy & Hold':>14}")
-    print(f"  {'─' * 64}")
-    print(f"  {'Rendement total (brut)':<34} {res_ml['rendement_total']:>+13.1f}% {res_bh['rendement_total']:>+13.1f}%")
-    print(f"  {'Rendement annualisé':<34} {rend_an_ml:>+13.1f}% {rend_an_bh:>+13.1f}%")
-    print(f"  {'Drawdown maximum':<34} {res_ml['drawdown_max']:>+13.1f}% {res_bh['drawdown_max']:>+13.1f}%")
-    print(f"  {'Ratio de Sharpe':<34} {res_ml.get('sharpe',0):>14.2f} {res_bh.get('sharpe',0):>14.2f}")
-    print(f"  {'Ratio de Sortino':<34} {res_ml.get('sortino',0):>14.2f} {res_bh.get('sortino',0):>14.2f}")
-    print(f"  {'─' * 64}")
-    print(f"  {'Win Rate':<34} {res_ml['win_rate']:>13.1f}%   {'—':>13}")
-    print(f"  {'Nombre de trades':<34} {res_ml['nb_trades']:>14}   {'—':>13}")
-    print(f"  {'Durée moy. détention (jours)':<34} {res_ml.get('duree_moy',0):>14.0f}   {'—':>13}")
-    print(f"  {'Frais de transaction cumulés':<34} {res_ml.get('frais_totaux',0):>12.0f} €   {'~30 €':>13}")
-    print(f"  {'─' * 64}")
-    print(f"  Après fiscalité PEA :")
-    print(f"  {'Capital net final':<34} {fisc_ml['net']:>12.0f} €   {fisc_bh['net']:>11.0f} €")
-
-    if res_etf:
-        print(f"  {'─' * 64}")
-        print(f"  Référence passive — {ETF_REFERENCE_NOM} :")
-        print(f"  {'Rendement total':<34} {res_etf['rendement_total']:>+13.1f}%")
-
-    ecart = res_ml["rendement_total"] - res_bh["rendement_total"]
-    verdict = f"✅ La stratégie surperforme de {ecart:+.1f}%" if ecart > 5 else (f"⚠️ Buy & Hold surperforme de {-ecart:.1f}%" if ecart < -5 else f"⚪ Performances similaires (écart {ecart:+.1f}%)")
-    print(f"\n  {verdict}")
-    print(f"{'═' * L}")
-
-    if res_ml["trades"]:
-        print(f"\n  Trades de la stratégie ({res_ml['nb_trades']}) :")
-        for t in res_ml["trades"]:
-            signe = "✅" if t[4] > 0 else "❌"
-            print(f"    {signe}  {str(t[0].date()):>12} → {str(t[2].date()):>12}  {t[1]:>8.2f} → {t[3]:>8.2f}  ({t[4]:>+6.1f}%)  [{t[5]}]")
-
-def tracer_courbes(nom, res_ml, res_bh):
-    if not MPL_AVAILABLE: return
-    fig, ax = plt.subplots(figsize=(12, 5))
-    res_bh["courbe"].plot(ax=ax, label="Buy & Hold", color="#888", linestyle="--")
-    res_ml["courbe"].plot(ax=ax, label="Oracle v15", color="#2196F3", linewidth=1.5)
-    ax.set_title(f"Oracle v15 (Money Management) vs Buy & Hold — {nom}")
-    ax.set_ylabel("Valeur du portefeuille (€)")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(f"backtest_{nom.replace(' ', '_').replace('/', '_')}.png", dpi=120)
-    plt.close()
-
-def backtester_actif(symbol: str, nom: str, periode: str = PERIODE):
-    print(f"\n⏳  {nom} ({symbol}) — téléchargement {periode}…")
-    df_raw = telecharger_avec_cache(symbol, periode=periode)
-    if df_raw.empty or len(df_raw) < MIN_TRAIN_JOURS + 100:
-        print(f"  ❌ Données insuffisantes")
+    if not achats and not ventes:
+        print("Aucun signal urgent — aucun message envoyé.")
         return
 
-    df = calculer_indicateurs(df_raw)
-    df_clean = df.dropna(subset=FEATURES + ["Target"]).copy()
-    
-    print(f"  Calcul du Walk-Forward et Intégration S&P 500…")
-    df_signaux = walk_forward_signaux(df_clean)
+    SEP = "════════════════════"
+    now = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
+    n   = len(achats) + len(ventes)
 
-    if len(df_signaux) < 50:
-        print(f"  ❌ Trop peu de signaux")
-        return
+    msg  = "🚨 " + bold("ALERTE ANALYSE — " + now) + "\n"
+    msg += esc(f"  {n} signal(s) urgent(s) sur {len(data_actifs)} valeurs analysées") + "\n"
+    msg += SEP + "\n\n"
 
-    res_ml = simuler_oracle(df_signaux)
-    res_bh = simuler_buy_hold(df_signaux)
-    res_etf = simuler_etf_reference(df_signaux.index[0].to_pydatetime(), df_signaux.index[-1].to_pydatetime()) if symbol != ETF_REFERENCE else None
+    if achats:
+        msg += bold("📈 ACHAT / RENFORCEMENT") + "\n\n"
+        for symbol, data in achats:
+            conv = conviction_score(data, macro_mod, macro_tnx)
+            msg += esc(f"• {data['name']}") + "  " + bold(f"{conv}/10") + "\n"
+            msg += esc(f"  RSI {data['rsi']:.0f}  ·  {data['price']:.2f} €  ·  {data['change']:+.1f}% auj.") + "\n"
+            ia = interpreter_ia(data)
+            if ia:
+                msg += esc(f"  {ia}") + "\n"
+            msg += esc(f"  {verdict_action(data, conv)}") + "\n\n"
 
-    afficher_tableau(f"{nom} ({symbol})", res_ml, res_bh, df_signaux.index[0].to_pydatetime(), df_signaux.index[-1].to_pydatetime(), res_etf)
-    tracer_courbes(nom, res_ml, res_bh)
+    if ventes:
+        msg += bold("🔴 VENTE / ALLÈGEMENT") + "\n\n"
+        for symbol, data in ventes:
+            conv = conviction_score(data, macro_mod, macro_tnx)
+            msg += esc(f"• {data['name']}") + "\n"
+            msg += esc(f"  RSI {data['rsi']:.0f}  ·  {data['price']:.2f} €  ·  {data['change']:+.1f}% auj.") + "\n"
+            msg += esc(f"  {verdict_action(data, conv)}") + "\n\n"
+
+    msg += esc("⚠️ Systeme d'analyse — n'execute aucun ordre. Reperes indicatifs, pas un conseil financier.")
+    envoyer_telegram(msg, CHAT_ID, TELEGRAM_TOKEN)
+
+# ==============================================================================
+# AUTOMATISATION LOCALE — MacBook Air
+# ==============================================================================
+# OPTION A — crontab (simple, natif macOS/Linux)
+# Ouvrez le terminal et tapez : crontab -e
+# Ajoutez ces deux lignes (adaptez /chemin/vers/votre/projet) :
+#
+#   # Rapport quotidien complet — lundi à vendredi à 17h30 (heure Paris)
+#   30 17 * * 1-5 cd /chemin/projet && python screener_pro.py >> ~/oracle_rapport.log 2>&1
+#
+#   # Alertes intraday — toutes les heures entre 9h et 17h, jours ouvrés
+#   0 9-17 * * 1-5 cd /chemin/projet && python screener_pro.py --alertes >> ~/oracle_alertes.log 2>&1
+#
+# OPTION B — launchd (recommandé macOS, résiste au mode veille)
+# Créez le fichier ~/Library/LaunchAgents/com.oracle.bourse.plist avec :
+#
+# <?xml version="1.0" encoding="UTF-8"?>
+# <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+#   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+# <plist version="1.0">
+# <dict>
+#   <key>Label</key>             <string>com.oracle.bourse</string>
+#   <key>ProgramArguments</key>
+#   <array>
+#     <string>/usr/bin/python3</string>
+#     <string>/chemin/projet/screener_pro.py</string>
+#   </array>
+#   <key>EnvironmentVariables</key>
+#   <dict>
+#     <key>TELEGRAM_TOKEN</key>   <string>VOTRE_TOKEN</string>
+#     <key>TELEGRAM_CHAT_ID</key> <string>VOTRE_CHAT_ID</string>
+#   </dict>
+#   <key>StartCalendarInterval</key>
+#   <dict>
+#     <key>Hour</key>    <integer>17</integer>
+#     <key>Minute</key>  <integer>30</integer>
+#     <key>Weekday</key> <integer>1</integer>
+#   </dict>
+#   <key>StandardOutPath</key>  <string>/tmp/oracle_rapport.log</string>
+#   <key>StandardErrorPath</key><string>/tmp/oracle_rapport_err.log</string>
+# </dict>
+# </plist>
+#
+# Activez-le : launchctl load ~/Library/LaunchAgents/com.oracle.bourse.plist
+# Désactivez : launchctl unload ~/Library/LaunchAgents/com.oracle.bourse.plist
+#
+# NOTE : GitHub Actions reste la solution recommandée — elle ne dépend pas
+# du Mac étant allumé et connecté. Le crontab/launchd est utile si vous
+# souhaitez les alertes intraday à une fréquence supérieure à ce qu'Actions permet.
+# ==============================================================================
 
 if __name__ == "__main__":
-    periode = PERIODE
-    if "--periode" in sys.argv:
-        i = sys.argv.index("--periode")
-        periode = sys.argv[i + 1]
-
-    if "--vider-cache" in sys.argv:
-        import shutil
-        if os.path.exists(CACHE_DIR):
-            shutil.rmtree(CACHE_DIR)
-            print(f"🗑️  Cache vidé.")
-
-    print("═" * 70)
-    print("  Backtest v15 — Money Management, Trailing Stop, Filtre de Régime")
-    print(f"  Risque par trade : {RISQUE_PAR_TRADE*100}% du Capital ({CAPITAL_INIT} €)")
-    print("═" * 70)
-
-    if "--ticker" in sys.argv:
-        i = sys.argv.index("--ticker")
-        sym = sys.argv[i + 1]
-        backtester_actif(sym, TICKERS_BACKTEST.get(sym, sym), periode)
+    if "--alertes" in sys.argv:
+        generer_alertes()
     else:
-        for sym, nom in TICKERS_BACKTEST.items():
-            backtester_actif(sym, nom, periode)
+        generer_rapport()
