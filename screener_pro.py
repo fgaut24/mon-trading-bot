@@ -1,3 +1,20 @@
+"""
+Systeme d'analyse multi-couches du CAC 40 et des ETF PEA
+=========================================================
+Outil d'AIDE A LA DECISION et de VEILLE. Il produit un rapport quotidien
+combinant analyse technique, intelligence artificielle, fondamentale et
+macroeconomique, envoye sur Telegram.
+
+AVERTISSEMENT IMPORTANT :
+Ce systeme N'EXECUTE AUCUN ORDRE de bourse. Il ne passe ni achat ni vente.
+Il fournit de l'INFORMATION et des SIGNAUX D'ANALYSE, jamais des instructions
+a executer automatiquement. Toute decision d'investissement releve de
+l'utilisateur seul. Les niveaux affiches (entree, objectif, stop) sont des
+reperes techniques indicatifs, en aucun cas un conseil en investissement.
+
+Les performances passees ne prejugent pas des resultats futurs.
+"""
+
 import os
 import sys
 import json
@@ -62,7 +79,7 @@ CAC_40 = {
     "STLAM.MI": "Stellantis",
     "MT.AS":    "ArcelorMittal",
     "ML.PA":    "Michelin",
-    "STMPA.PA":   "STMicro",
+    "STM.PA":   "STMicro",
     # Banque & assurance
     "BNP.PA":   "BNP Paribas",
     "ACA.PA":   "Crédit Agricole",
@@ -103,7 +120,7 @@ ETF_PEA = {
 TICKERS = {**CAC_40, **ETF_PEA}   # 47 actifs au total
 
 portefeuille = {
-    "MC.PA": {"nom": "LVMH", "prix_achat": 458.45, "quantite": 1}
+    
 }
 
 # ==============================================================================
@@ -519,7 +536,7 @@ def fetch_indicators_and_predict(ticker_symbol):
 
 # ==============================================================================
 # GÉNÉRATION DU RAPPORT — 2 MESSAGES
-# Message 1 : résumé exécutif + signaux actionnables + portefeuille
+# Message 1 : résumé exécutif + signaux actionnables
 # Message 2 : tableau de bord complet + validation IA
 # ==============================================================================
 def generer_rapport():
@@ -559,7 +576,7 @@ def generer_rapport():
     # ══════════════════════════════════════════════════════════════════════════
     # MESSAGE 1 : INTELLIGENCE ACTIONNABLE
     # ══════════════════════════════════════════════════════════════════════════
-    m1  = "📊 " + bold(f"ORACLE CAC 40 — {now}") + "\n"
+    m1  = "📊 " + bold(f"ANALYSE CAC 40 — {now}") + "\n"
     m1 += esc(f"({n_actifs} valeurs analysées — CAC 40 + ETF PEA)") + "\n"
     m1 += SEP + "\n"
     m1 += esc(f"🌡️ {meteo}") + "\n"
@@ -601,29 +618,6 @@ def generer_rapport():
 
     m1 += SEP + "\n"
 
-    # Portefeuille
-    m1 += "\n💼 " + bold("MON PORTEFEUILLE") + "\n"
-    total_investi = total_actuel = 0
-    for symbol, pos in portefeuille.items():
-        if symbol in data_actifs:
-            actuel_price = data_actifs[symbol]["price"]
-            val_investie = pos["prix_achat"] * pos["quantite"]
-            val_actuelle = actuel_price * pos["quantite"]
-            pnl_euro     = val_actuelle - val_investie
-            pnl_pct      = (pnl_euro / val_investie) * 100
-            conv         = conviction_score(data_actifs[symbol], macro_mod, macro_tnx)
-            total_investi += val_investie
-            total_actuel  += val_actuelle
-            perf_s = "🟢" if pnl_euro >= 0 else "🔴"
-            m1 += esc(f"  {perf_s} {pos['nom']} ({pos['quantite']} part)") + "\n"
-            m1 += esc(f"     Valeur : {val_actuelle:.0f} € · achat {val_investie:.0f} €") + "\n"
-            m1 += esc(f"     P&L : {pnl_euro:+.2f} € ({pnl_pct:+.1f}%)  · Aujourd'hui : {data_actifs[symbol]['change']:+.1f}%") + "\n"
-            m1 += esc(f"     Signal : {conv}/10 {score_label(conv)} — {interpreter_signal(data_actifs[symbol])}") + "\n\n"
-
-    g_pnl  = total_actuel - total_investi
-    g_pct  = (g_pnl / total_investi * 100) if total_investi > 0 else 0
-    g_symb = "🟢" if g_pnl >= 0 else "🔴"
-    m1 += esc(f"  {g_symb} TOTAL : {total_actuel:.0f} € · investi {total_investi:.0f} € · P&L : {g_pnl:+.2f} € ({g_pct:+.1f}%)") + "\n"
 
     # ══════════════════════════════════════════════════════════════════════════
     # MESSAGE 2 : TABLEAU DE BORD COMPLET
@@ -666,7 +660,7 @@ def generer_rapport():
         m2 += "\n" + SEP + "\n"
 
     m2 += "\n🤖 `RSI · MACD · SMA200 · OBV · IA 7 features · Conviction /10 · Fonda PER+Marge · Macro VIX+US10Y`\n"
-    m2 += esc("⚠️ Niveaux ATR indicatifs — pas un conseil financier.")
+    m2 += esc("⚠️ Systeme d'analyse — n'execute aucun ordre. Reperes indicatifs, pas un conseil financier.")
 
     # ── Envoi des deux messages ───────────────────────────────────────────────
     envoyer_telegram(m1, CHAT_ID, TELEGRAM_TOKEN)
@@ -712,7 +706,7 @@ def generer_alertes():
     now = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
     n   = len(achats) + len(ventes)
 
-    msg  = "🚨 " + bold("ALERTE ORACLE — " + now) + "\n"
+    msg  = "🚨 " + bold("ALERTE ANALYSE — " + now) + "\n"
     msg += esc(f"  {n} signal(s) urgent(s) sur {len(data_actifs)} valeurs analysées") + "\n"
     msg += SEP + "\n\n"
 
@@ -735,7 +729,7 @@ def generer_alertes():
             msg += esc(f"  RSI {data['rsi']:.0f}  ·  {data['price']:.2f} €  ·  {data['change']:+.1f}% auj.") + "\n"
             msg += esc(f"  {verdict_action(data, conv)}") + "\n\n"
 
-    msg += esc("⚠️ Niveaux ATR indicatifs — pas un conseil financier.")
+    msg += esc("⚠️ Systeme d'analyse — n'execute aucun ordre. Reperes indicatifs, pas un conseil financier.")
     envoyer_telegram(msg, CHAT_ID, TELEGRAM_TOKEN)
 
 # ==============================================================================
