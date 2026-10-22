@@ -1,194 +1,5 @@
 [
   {
-    "date": "2026-06-17",
-    "assets": {
-      "MC.PA": {
-        "price": 511.0,
-        "prob_up": 32.3
-      },
-      "RMS.PA": {
-        "price": 1727.5,
-        "prob_up": 17.2
-      },
-      "OR.PA": {
-        "price": 382.15,
-        "prob_up": 57.5
-      },
-      "KER.PA": {
-        "price": 264.9,
-        "prob_up": 39.6
-      },
-      "EL.PA": {
-        "price": 174.75,
-        "prob_up": 67.7
-      },
-      "TTE.PA": {
-        "price": 72.21,
-        "prob_up": 88.8
-      },
-      "ENGI.PA": {
-        "price": 26.96,
-        "prob_up": 52.1
-      },
-      "AIR.PA": {
-        "price": 187.02,
-        "prob_up": 42.3
-      },
-      "SAF.PA": {
-        "price": 324.0,
-        "prob_up": 52.3
-      },
-      "HO.PA": {
-        "price": 231.0,
-        "prob_up": 66.3
-      },
-      "DG.PA": {
-        "price": 130.3,
-        "prob_up": 29.8
-      },
-      "LR.PA": {
-        "price": 145.0,
-        "prob_up": 56.8
-      },
-      "SU.PA": {
-        "price": 282.75,
-        "prob_up": 35.8
-      },
-      "SGO.PA": {
-        "price": 78.88,
-        "prob_up": 29.7
-      },
-      "ALO.PA": {
-        "price": 16.185,
-        "prob_up": 81.6
-      },
-      "FGR.PA": {
-        "price": 130.25,
-        "prob_up": 49.7
-      },
-      "RNO.PA": {
-        "price": 27.23,
-        "prob_up": 41.8
-      },
-      "STLAM.MI": {
-        "price": 5.777,
-        "prob_up": 89.8
-      },
-      "MT.AS": {
-        "price": 57.82,
-        "prob_up": 80.7
-      },
-      "ML.PA": {
-        "price": 33.32,
-        "prob_up": 39.3
-      },
-      "BNP.PA": {
-        "price": 101.2,
-        "prob_up": 60.2
-      },
-      "ACA.PA": {
-        "price": 17.515,
-        "prob_up": 74.4
-      },
-      "GLE.PA": {
-        "price": 77.84,
-        "prob_up": 73.6
-      },
-      "CS.PA": {
-        "price": 42.53,
-        "prob_up": 15.3
-      },
-      "SAN.PA": {
-        "price": 74.88,
-        "prob_up": 56.5
-      },
-      "AI.PA": {
-        "price": 166.9,
-        "prob_up": 64.7
-      },
-      "BIM.PA": {
-        "price": 67.75,
-        "prob_up": 71.3
-      },
-      "VIE.PA": {
-        "price": 35.91,
-        "prob_up": 45.0
-      },
-      "ORA.PA": {
-        "price": 16.935,
-        "prob_up": 83.9
-      },
-      "EN.PA": {
-        "price": 50.42,
-        "prob_up": 73.4
-      },
-      "URW.PA": {
-        "price": 100.4,
-        "prob_up": 39.6
-      },
-      "CAP.PA": {
-        "price": 97.66,
-        "prob_up": 61.4
-      },
-      "DSY.PA": {
-        "price": 17.315,
-        "prob_up": 5.4
-      },
-      "PUB.PA": {
-        "price": 91.46,
-        "prob_up": 20.8
-      },
-      "WLN.PA": {
-        "price": 11.226,
-        "prob_up": 32.6
-      },
-      "BN.PA": {
-        "price": 65.8,
-        "prob_up": 34.9
-      },
-      "CA.PA": {
-        "price": 16.44,
-        "prob_up": 81.4
-      },
-      "RI.PA": {
-        "price": 62.52,
-        "prob_up": 42.3
-      },
-      "VIV.PA": {
-        "price": 2.198,
-        "prob_up": 19.9
-      },
-      "WPEA.PA": {
-        "price": 6.811,
-        "prob_up": 52.9
-      },
-      "CW8.PA": {
-        "price": 676.2673,
-        "prob_up": 47.1
-      },
-      "PANX.PA": {
-        "price": 78.177,
-        "prob_up": 75.0
-      },
-      "PSP5.PA": {
-        "price": 56.9,
-        "prob_up": 40.8
-      },
-      "PAEEM.PA": {
-        "price": 37.138,
-        "prob_up": 17.0
-      },
-      "MEUD.PA": {
-        "price": 314.05,
-        "prob_up": 74.6
-      },
-      "CACC.PA": {
-        "price": 42.695,
-        "prob_up": 28.5
-      }
-    }
-  },
-  {
     "date": "2026-06-18",
     "assets": {
       "MC.PA": {
@@ -17002,6 +16813,195 @@
       "CACC.PA": {
         "price": 40.285,
         "prob_up": 84.0
+      }
+    }
+  },
+  {
+    "date": "2026-10-22",
+    "assets": {
+      "MC.PA": {
+        "price": 387.8,
+        "prob_up": 83.6
+      },
+      "RMS.PA": {
+        "price": 1289.5,
+        "prob_up": 57.9
+      },
+      "OR.PA": {
+        "price": 413.0,
+        "prob_up": 20.4
+      },
+      "KER.PA": {
+        "price": 213.5,
+        "prob_up": 82.4
+      },
+      "EL.PA": {
+        "price": 177.15,
+        "prob_up": 61.2
+      },
+      "TTE.PA": {
+        "price": 79.98,
+        "prob_up": 92.9
+      },
+      "ENGI.PA": {
+        "price": 23.11,
+        "prob_up": 49.5
+      },
+      "AIR.PA": {
+        "price": 194.78,
+        "prob_up": 59.5
+      },
+      "SAF.PA": {
+        "price": 302.0,
+        "prob_up": 92.1
+      },
+      "HO.PA": {
+        "price": 226.7,
+        "prob_up": 66.3
+      },
+      "DG.PA": {
+        "price": 105.95,
+        "prob_up": 90.4
+      },
+      "LR.PA": {
+        "price": 123.65,
+        "prob_up": 74.3
+      },
+      "SU.PA": {
+        "price": 235.75,
+        "prob_up": 67.0
+      },
+      "SGO.PA": {
+        "price": 66.4,
+        "prob_up": 66.6
+      },
+      "ALO.PA": {
+        "price": 15.915,
+        "prob_up": 60.7
+      },
+      "FGR.PA": {
+        "price": 97.7,
+        "prob_up": 97.2
+      },
+      "RNO.PA": {
+        "price": 26.67,
+        "prob_up": 6.9
+      },
+      "STLAM.MI": {
+        "price": 3.7935,
+        "prob_up": 45.3
+      },
+      "MT.AS": {
+        "price": 53.92,
+        "prob_up": 76.0
+      },
+      "ML.PA": {
+        "price": 31.45,
+        "prob_up": 74.4
+      },
+      "BNP.PA": {
+        "price": 82.57,
+        "prob_up": 58.3
+      },
+      "ACA.PA": {
+        "price": 14.855,
+        "prob_up": 77.8
+      },
+      "GLE.PA": {
+        "price": 59.72,
+        "prob_up": 75.4
+      },
+      "CS.PA": {
+        "price": 42.02,
+        "prob_up": 54.7
+      },
+      "SAN.PA": {
+        "price": 74.95,
+        "prob_up": 15.6
+      },
+      "AI.PA": {
+        "price": 173.58,
+        "prob_up": 38.1
+      },
+      "BIM.PA": {
+        "price": 88.25,
+        "prob_up": 29.5
+      },
+      "VIE.PA": {
+        "price": 31.82,
+        "prob_up": 73.2
+      },
+      "ORA.PA": {
+        "price": 14.365,
+        "prob_up": 68.1
+      },
+      "EN.PA": {
+        "price": 40.14,
+        "prob_up": 70.5
+      },
+      "URW.PA": {
+        "price": 90.12,
+        "prob_up": 95.9
+      },
+      "CAP.PA": {
+        "price": 126.8,
+        "prob_up": 8.7
+      },
+      "DSY.PA": {
+        "price": 24.06,
+        "prob_up": 40.7
+      },
+      "PUB.PA": {
+        "price": 101.5,
+        "prob_up": 65.6
+      },
+      "WLN.PA": {
+        "price": 11.512,
+        "prob_up": 73.7
+      },
+      "BN.PA": {
+        "price": 62.38,
+        "prob_up": 54.9
+      },
+      "CA.PA": {
+        "price": 13.685,
+        "prob_up": 65.6
+      },
+      "RI.PA": {
+        "price": 67.6,
+        "prob_up": 22.0
+      },
+      "VIV.PA": {
+        "price": 1.588,
+        "prob_up": 76.9
+      },
+      "WPEA.PA": {
+        "price": 7.121,
+        "prob_up": 75.9
+      },
+      "CW8.PA": {
+        "price": 706.32,
+        "prob_up": 65.8
+      },
+      "PANX.PA": {
+        "price": 83.01,
+        "prob_up": 89.7
+      },
+      "PSP5.PA": {
+        "price": 60.15,
+        "prob_up": 69.5
+      },
+      "PAEEM.PA": {
+        "price": 34.25,
+        "prob_up": 81.0
+      },
+      "MEUD.PA": {
+        "price": 314.8,
+        "prob_up": 59.4
+      },
+      "CACC.PA": {
+        "price": 39.71,
+        "prob_up": 85.6
       }
     }
   }
